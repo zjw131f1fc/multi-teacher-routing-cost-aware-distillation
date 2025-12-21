@@ -203,6 +203,7 @@ AUTO_NAME_FIELDS = [
 BACKBONE_DIM_MAP = {
     "qwen-2.5-3b": {"hidden_dim": 2048, "vision_dim": 2048},
     "llava-1.5-7b": {"hidden_dim": 4096, "vision_dim": 1024},
+    "qwen2.5-0.5b-instruct": {"hidden_dim": 896},  # LLM, no vision_dim
 }
 
 
@@ -487,11 +488,17 @@ def load_config(override_dict: Optional[Dict[str, Any]] = None,
     
     # 5. 根据 backbone 名称自动设置 hidden_dim 和 vision_dim
     backbone_name = config["backbone_settings"]["name"]
+    backbone_type = config["backbone_settings"]["type"]
     if backbone_name not in BACKBONE_DIM_MAP:
         raise ValueError(f"未知的 backbone 名称: {backbone_name}，支持的模型: {list(BACKBONE_DIM_MAP.keys())}")
     dim_config = BACKBONE_DIM_MAP[backbone_name]
-    config["backbone_settings"]["mllm_settings"]["hidden_dim"] = dim_config["hidden_dim"]
-    config["backbone_settings"]["mllm_settings"]["vision_dim"] = dim_config["vision_dim"]
+
+    # 根据 backbone 类型设置维度
+    if backbone_type == "mllm":
+        config["backbone_settings"]["mllm_settings"]["hidden_dim"] = dim_config["hidden_dim"]
+        config["backbone_settings"]["mllm_settings"]["vision_dim"] = dim_config["vision_dim"]
+    elif backbone_type == "llm":
+        config["backbone_settings"]["llm_settings"]["hidden_dim"] = dim_config["hidden_dim"]
     
     # 6. 生成 experiment_tag 和路径（如果不跳过）
     if not skip_auto_paths:

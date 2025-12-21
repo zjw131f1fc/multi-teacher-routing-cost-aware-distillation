@@ -2,12 +2,13 @@
 
 配置关键字段 (Config.backbone_settings):
     type: str
-        Backbone 类型，例如 'mllm'。
+        Backbone 类型，例如 'mllm' 或 'llm'。
     name: str
         注册表中的 backbone 键，例如 'qwen-2.5-3b'。
 
 当前支持类型:
     - 'mllm': 多模态大语言模型
+    - 'llm': 大语言模型
 
 扩展一个新 Backbone 步骤:
     1. 在 `backbones/base/` 下创建基类文件 (例如 base/mllm.py) 定义该类型的基类。
@@ -28,12 +29,18 @@ from .impl.mllm.qwen import QwenMLLMBackbone
 from .impl.mllm.llava import LLaVAMLLMBackbone
 from .impl.mllm.llava_next import LLaVANextMLLMBackbone
 
+# LLM 类型
+from .impl.llm.qwen import QwenLLMBackbone
+
 # 注册表结构: {type: {name: Class}}
 BACKBONE_REGISTRY: Dict[str, Dict[str, Type[Any]]] = {
     "mllm": {
         "qwen-2.5-3b": QwenMLLMBackbone,
         "llava-1.5-7b": LLaVAMLLMBackbone,
         "llava-1.6-vicuna-7b": LLaVANextMLLMBackbone,
+    },
+    "llm": {
+        "qwen2.5-0.5b-instruct": QwenLLMBackbone,
     },
 }
 

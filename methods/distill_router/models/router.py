@@ -20,7 +20,15 @@ class Router(nn.Module):
         super().__init__()
 
         # Extract parameters from config
-        self.d_input = config["backbone_settings"]["mllm_settings"]["hidden_dim"]
+        # Support both mllm_settings and llm_settings
+        backbone_cfg = config["backbone_settings"]
+        if "mllm_settings" in backbone_cfg:
+            self.d_input = backbone_cfg["mllm_settings"]["hidden_dim"]
+        elif "llm_settings" in backbone_cfg:
+            self.d_input = backbone_cfg["llm_settings"]["hidden_dim"]
+        else:
+            raise ValueError("No hidden_dim found in backbone_settings")
+
         self.num_teachers = config["method_settings"]["num_teachers"]
         self.d_hidden = config["method_settings"]["router_d_hidden"]
         self.dropout = config["method_settings"]["router_dropout"]

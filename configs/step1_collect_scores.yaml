@@ -1,0 +1,53 @@
+# Step1: 收集学生模型的 NTE 分数配置
+
+global_settings:
+  seed: 42
+  device: "cuda"
+  dtype: "float"
+  pytorch_cuda_alloc_conf: "expandable_segments:True"
+  dataset_cache_dir: "/data/users/zjw/dataset_cache"
+  hf_cache_dir: "/data/users/zjw/huggingface_cache"
+  study_name: "step1_collect_scores"  # 用于日志和输出文件命名
+
+config_settings:
+  enable_dict_overrides: true
+  enable_yaml_overrides: true
+  log_config_on_load: true
+
+dataset_settings:
+  type: "distill"
+  name: "distill-openr1-math"
+  distill_settings:
+    split:
+      train: 'all'
+
+backbone_settings:
+  type: "llm"
+  name: "qwen2.5-0.5b-instruct"
+  llm_settings:
+    device_map: "auto"
+    # max_tokens: 512
+
+method_settings:
+  # Study name (用于日志标识，不影响输出文件路径)
+  study_name: "step1_collect_scores"
+
+  # Data filtering
+  required_teachers:
+    - "deepseek-r1"
+    - "qwen2.5-math-7b-instruct"
+
+  # NTE Score 参数
+  nte_alpha: 2.0  # Beta 分布参数 α (偏好高 likelihood)
+  nte_beta: 0.5   # Beta 分布参数 β (考虑不确定性)
+
+  # NTE 指数平滑参数: V_soft = ε + (1-ε)×V, NTE = V_soft^α × M_prox^β
+  nte_quality_power: 0.3     # 质量分数的指数 α (推荐 0.3, 更重视可学习性)
+  nte_proximity_power: 0.7   # 可学习性分数的指数 β (推荐 0.7, 主导作用)
+  nte_quality_floor: 0.1     # 质量分数下限 ε (default=0.1, 低质量响应保留 10% 权重)
+
+  # 质量分数的 reward key
+  reward_key: "math_verify"  # 从 rewards 中提取哪个 key 作为质量分数
+
+  # 处理控制
+  max_samples: null  # null = 处理所有样本，设置数字可以限制处理数量（用于调试）

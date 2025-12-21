@@ -110,58 +110,17 @@ class OpenR1MathPreparer(BasePreparer):
         # 如果有多个生成，选择最好的作为 deepseek-r1，其他的加索引
         if len(messages_list) == 0:
             responses = {}
-        elif len(messages_list) == 1:
+        else:
             # 只有一个生成，直接使用 deepseek-r1
             responses = {
                 "deepseek-r1": {
-                    "messages": messages_list[0],
+                    "messages": messages_list,
                     "rewards": {
                         "math_verify": correctness_math[0] if len(correctness_math) > 0 else None,
                         "llama": correctness_llama[0] if len(correctness_llama) > 0 else None
                     }
                 }
             }
-        else:
-            # 多个生成：选择最好的作为 deepseek-r1
-            # 优先级：1) math+llama都对 2) math对 3) llama对 4) 第一个
-            best_idx = 0
-            best_score = -1
-
-            for i in range(len(messages_list)):
-                math_correct = correctness_math[i] if i < len(correctness_math) else None
-                llama_correct = correctness_llama[i] if i < len(correctness_llama) else None
-
-                # 计算得分
-                score = 0
-                if math_correct is True and llama_correct is True:
-                    score = 3  # 两个都对
-                elif math_correct is True:
-                    score = 2  # math 对
-                elif llama_correct is True:
-                    score = 1  # llama 对
-
-                if score > best_score:
-                    best_score = score
-                    best_idx = i
-
-            # 构建 responses：最好的用 deepseek-r1，其他的用索引
-            responses = {}
-            gen_counter = 1  # 从 gen1 开始编号其他生成
-
-            for i, msg in enumerate(messages_list):
-                if i == best_idx:
-                    model_key = "deepseek-r1"
-                else:
-                    model_key = f"deepseek-r1-gen{gen_counter}"
-                    gen_counter += 1
-
-                responses[model_key] = {
-                    "messages": msg,
-                    "rewards": {
-                        "math_verify": correctness_math[i] if i < len(correctness_math) else None,
-                        "llama": correctness_llama[i] if i < len(correctness_llama) else None
-                    }
-                }
 
         # 构建 metadata（包含原始的元信息）
         metadata = {
