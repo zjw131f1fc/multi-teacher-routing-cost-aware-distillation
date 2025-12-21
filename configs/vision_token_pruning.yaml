@@ -158,16 +158,18 @@ search_settings:
       log: false
 
 dataset_settings:  # 数据集配置
+  type: "vqa"  # 数据集类型
   name: "vqa-vqav2"  # 数据集名称
-  split:
-    train: 14000  # 训练集：800样本（充分训练）
-    test: 200  # 测试集：200样本（准确评估）
-  category_priority:
-    enable: false  # 禁用类别均衡，加快数据加载
-    values:
-      - train: "mean"
-      - test: "mean"
-  fast_load_no_random: true  # 快速加载模式（Optuna搜索时加速）
+  vqa_settings:  # VQA特定配置
+    split:
+      train: 14000  # 训练集：800样本（充分训练）
+      test: 200  # 测试集：200样本（准确评估）
+    category_priority:
+      enable: false  # 禁用类别均衡，加快数据加载
+      values:
+        - train: "mean"
+        - test: "mean"
+    fast_load_no_random: true  # 快速加载模式（Optuna搜索时加速）
 
 config_settings:
   enable_dict_overrides: true

@@ -1,45 +1,96 @@
 """数据集加载入口 (registry 机制)。
 
-当前支持: 1) MME (键: 'vqa-mme')
+当前支持的数据集类型:
+    - VQA (Visual Question Answering): MME, VQAv2, POPE, MMBench, ScienceQA, GQA, SEED-Bench
+    - Distill (蒸馏训练): OpenR1-Math
 
 配置关键字段 (Config.dataset_settings):
+    type: str
+        数据集类型，例如 'vqa' 或 'distill'。
     name: str
-        注册表中的数据集键，例如 'vqa-mme'。
-    split: Dict[str, float|int]
-        目标 split 及其大小。float 表示总样本比例 (0<val<=1)，int 表示绝对数量 (>=0)。
-        计算逻辑在具体 Preparer 中完成；不足时会截断。
-    category_priority: Dict
-        类别优先级配置，包含:
-            'enable': bool
-                是否启用类别优先级分配。
-            'values': List[Dict[str,str]]
-                按优先级顺序的类别分配模式列表。
-                形式: [ {split: mode}, {split: mode}, ... ]，mode 支持:
-                    'mean':   尽量均衡该 split 的各类别数量。
-                    'origin': 按当前剩余样本的类别比例进行分配。
-                未出现的 split 默认使用 'origin'。重复 split 的后续项被忽略。
-    fast_load_no_random: bool
-        是否以快速模式加载数据集（不随机打乱）。
+        注册表中的数据集键，格式: 'type-name'，例如 'vqa-mme' 或 'distill-openr1-math'。
+    <type>_settings: Dict
+        特定类型的配置。
+
+        VQA 数据集 ('vqa_settings') 包含：
+            split: Dict[str, float|int]
+                目标 split 及其大小。float 表示总样本比例 (0<val<=1)，int 表示绝对数量 (>=0)。
+                计算逻辑在具体 Preparer 中完成；不足时会截断。
+            category_priority: Dict
+                类别优先级配置，包含:
+                    'enable': bool
+                        是否启用类别优先级分配。
+                    'values': List[Dict[str,str]]
+                        按优先级顺序的类别分配模式列表。
+                        形式: [ {split: mode}, {split: mode}, ... ]，mode 支持:
+                            'mean':   尽量均衡该 split 的各类别数量。
+                            'origin': 按当前剩余样本的类别比例进行分配。
+                        未出现的 split 默认使用 'origin'。重复 split 的后续项被忽略。
+            fast_load_no_random: bool
+                是否以快速模式加载数据集（不随机打乱）。
+
+        蒸馏数据集 ('distill_settings') 包含：
+            split: Dict[str, float|int]
+                目标 split 及其大小（支持 float/int/-1/'all'）。
+
+配置示例（分层结构，与 backbone/trainer 一致）:
+    # VQA 数据集
+    dataset_settings:
+      type: "vqa"
+      name: "vqa-vqav2"
+      vqa_settings:
+        split:
+          train: 14000
+          test: 200
+        category_priority:
+          enable: false
+          values:
+            - train: "mean"
+            - test: "mean"
+        fast_load_no_random: true
+
+    # 蒸馏数据集
+    dataset_settings:
+      type: "distill"
+      name: "distill-openr1-math"
+      distill_settings:
+        split:
+          train: 10000
+          test: 1000
 
 扩展一个新数据集步骤:
-    1. 在 `datas/impl/` 下创建实现 (例如 mydataset.py) 并提供类似 Preparer 接口 (构造接受 config, 提供 get() 返回 {split: Dataset}).
-    2. 在这里导入实现中的 Preparer 类。
-    3. 将名称与类加入 DATASET_REGISTRY。
-    4. 在 Config.dataset_settings 中设置 name 与相关自定义字段。
+    1. 在 `datas/base/<type>.py` 创建基类（如果类型不存在）。
+    2. 在 `datas/impl/<type>/` 下创建实现 (例如 mydataset.py) 并提供 Preparer 接口
+       (构造接受 config, 提供 get() 返回 {splits, meta, judge})。
+    3. 在 `datas/impl/<type>/__init__.py` 中导出 Preparer 类。
+    4. 在这里导入实现中的 Preparer 类并加入 DATASET_REGISTRY。
+    5. 在 Config.dataset_settings 中设置 type, name 与 <type>_settings。
 
 注意: 这里不做 try/except 包装，错误将直接抛出以便快速发现配置问题。
 """
 
 from typing import Dict, Type, Any, List, Optional
-from .impl.mme import MMEPreparer
-from .impl.vqa_v2 import VQAV2Preparer
-from .impl.pope import POPEPreparer
-from .impl.mmb import MMBenchPreparer
-from .impl.scienceqa import ScienceQAPreparer
-from .impl.gqa import GQAPreparer
-from .impl.seed_bench import SEEDBenchPreparer
 
+# VQA datasets
+from .impl.vqa import (
+    MMEPreparer,
+    VQAV2Preparer,
+    POPEPreparer,
+    MMBenchPreparer,
+    ScienceQAPreparer,
+    GQAPreparer,
+    SEEDBenchPreparer,
+)
+
+# Distill datasets
+from .impl.distill import (
+    OpenR1MathPreparer,
+)
+
+# Registry: 所有支持的数据集
+# 格式: "type-name": PreparerClass
 DATASET_REGISTRY: Dict[str, Type[Any]] = {
+    # VQA datasets
     "vqa-mme": MMEPreparer,
     "vqa-vqav2": VQAV2Preparer,
     "vqa-pope": POPEPreparer,
@@ -47,6 +98,14 @@ DATASET_REGISTRY: Dict[str, Type[Any]] = {
     "vqa-sqa": ScienceQAPreparer,
     "vqa-gqa": GQAPreparer,
     "vqa-seed": SEEDBenchPreparer,
+
+    # Distill datasets
+    "distill-openr1-math": OpenR1MathPreparer,
+
+    # 未来可以添加其他类型:
+    # "captioning-coco": COCOCaptionPreparer,
+    # "detection-coco": COCODetectionPreparer,
+    # etc.
 }
 
 
@@ -57,7 +116,12 @@ def load_dataset(config: Optional[dict] = None) -> Any:
       - 单条: judge(pred_str, ref_str, sample) -> {correct,total,accuracy}
       - 批量: judge([pred...], [ref...]) -> {correct,total,accuracy}
     """
-    name = config["dataset_settings"]["name"] # type: ignore
+    # 兼容 dict 和 SimpleNamespace
+    if isinstance(config, dict):
+        name = config["dataset_settings"]["name"]
+    else:
+        name = config.dataset_settings.name
+
     if name not in DATASET_REGISTRY:
         raise KeyError(f"Dataset '{name}' is not registered. 已注册: {list_datasets()}")
     dataset_cls = DATASET_REGISTRY[name]
