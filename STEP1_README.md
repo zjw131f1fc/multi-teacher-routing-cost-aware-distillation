@@ -8,7 +8,7 @@
 
 ```
 V_soft(y) = ε + (1-ε) × V(y)  (将 [0,1] 映射到 [ε, 1])
-NTE(x,y) = V_soft(y)^α × M_prox(p)^β
+NTE(x,y) = V_soft(y)^α × M_prox(p)^β × 10  (输出范围 [0, 10])
 ```
 
 使用 **Soft Quality + 指数平滑组合**，解决离散质量分数（0/1）导致的区分度问题。
@@ -31,15 +31,15 @@ NTE(x,y) = V_soft(y)^α × M_prox(p)^β
 - `ε=0.0`: 退化为原始方案，quality=0 时 NTE=0
 
 **示例** (α=0.3, β=0.7, ε=0.1):
-- Quality=0, Proximity=0.9 → V_soft=0.1 → NTE ≈ 0.478
-- Quality=0, Proximity=0.5 → V_soft=0.1 → NTE ≈ 0.314
-- Quality=0, Proximity=0.1 → V_soft=0.1 → NTE ≈ 0.158
-- Quality=1, Proximity=0.9 → V_soft=1.0 → NTE ≈ 0.933
-- Quality=1, Proximity=0.1 → V_soft=1.0 → NTE ≈ 0.200
+- Quality=0, Proximity=0.9 → V_soft=0.1 → NTE ≈ 4.78
+- Quality=0, Proximity=0.5 → V_soft=0.1 → NTE ≈ 3.14
+- Quality=0, Proximity=0.1 → V_soft=0.1 → NTE ≈ 1.58
+- Quality=1, Proximity=0.9 → V_soft=1.0 → NTE ≈ 9.33
+- Quality=1, Proximity=0.1 → V_soft=1.0 → NTE ≈ 2.00
 
 **关键特性**：
-- ✅ 即使 quality=0，proximity 差异仍能显著体现 (0.478 vs 0.158)
-- ✅ Proximity 主导：低质量+高可学习性 (0.478) > 高质量+低可学习性 (0.200)
+- ✅ 即使 quality=0，proximity 差异仍能显著体现 (4.78 vs 1.58)
+- ✅ Proximity 主导：低质量+高可学习性 (4.78) > 高质量+低可学习性 (2.00)
 
 ## 使用方法
 
@@ -115,7 +115,7 @@ method_cache/
         "likelihood": 0.45,      // 学生模型的似然概率
         "proximity": 0.78,       // 近端可学习性分数
         "quality": 0.85,         // 教师响应质量（从 reward_key 提取）
-        "nte_score": 0.663       // 最终 NTE 分数
+        "nte_score": 6.63        // 最终 NTE 分数 (0-10)
       }
     }
   }

@@ -84,7 +84,7 @@ def compute_nte_score(
         quality_floor: 质量分数的下限 ε (default=0.1)
 
     返回:
-        NTE: [0, 1] 之间的分数（自动归一化）
+        NTE: [0, 10] 之间的分数
 
     说明:
         - α<β (推荐 α=0.3, β=0.7): 更重视可学习性，适合离散质量分数
@@ -96,13 +96,13 @@ def compute_nte_score(
           - ε=0.5: 高低质量响应权重差异较小
 
     示例 (α=0.3, β=0.7, ε=0.1):
-        - Quality=0, Proximity=0.9: V_soft=0.1, NTE = 0.1^0.3 × 0.9^0.7 ≈ 0.478
-        - Quality=0, Proximity=0.5: V_soft=0.1, NTE = 0.1^0.3 × 0.5^0.7 ≈ 0.314
-        - Quality=0, Proximity=0.1: V_soft=0.1, NTE = 0.1^0.3 × 0.1^0.7 ≈ 0.158
-        - Quality=1, Proximity=0.9: V_soft=1.0, NTE = 1.0^0.3 × 0.9^0.7 ≈ 0.933
-        - Quality=1, Proximity=0.1: V_soft=1.0, NTE = 1.0^0.3 × 0.1^0.7 ≈ 0.200
-        → 即使 quality=0，proximity 的差异仍能显著体现 (0.478 vs 0.158)
-        → proximity 主导: 低质量+高可学习性 (0.478) > 高质量+低可学习性 (0.200)
+        - Quality=0, Proximity=0.9: V_soft=0.1, NTE = 0.1^0.3 × 0.9^0.7 × 10 ≈ 4.78
+        - Quality=0, Proximity=0.5: V_soft=0.1, NTE = 0.1^0.3 × 0.5^0.7 × 10 ≈ 3.14
+        - Quality=0, Proximity=0.1: V_soft=0.1, NTE = 0.1^0.3 × 0.1^0.7 × 10 ≈ 1.58
+        - Quality=1, Proximity=0.9: V_soft=1.0, NTE = 1.0^0.3 × 0.9^0.7 × 10 ≈ 9.33
+        - Quality=1, Proximity=0.1: V_soft=1.0, NTE = 1.0^0.3 × 0.1^0.7 × 10 ≈ 2.00
+        → 即使 quality=0，proximity 的差异仍能显著体现 (4.78 vs 1.58)
+        → proximity 主导: 低质量+高可学习性 (4.78) > 高质量+低可学习性 (2.00)
     """
     # 防止数值问题
     quality = np.clip(quality, 0.0, 1.0)
@@ -114,10 +114,11 @@ def compute_nte_score(
     # 指数平滑组合
     nte = (quality_soft ** quality_power) * (proximity ** proximity_power)
 
-    # 最终保证在 [0, 1]
-    # 注意: 因为 quality_soft ∈ [ε, 1], proximity ∈ [0, 1]
-    # 所以 NTE ∈ [0, 1] (当 ε > 0 时最小值 > 0)
-    return float(np.clip(nte, 0.0, 1.0))
+    # 缩放到 [0, 10] 范围
+    nte_scaled = nte * 10.0
+
+    # 最终保证在 [0, 10]
+    return float(np.clip(nte_scaled, 0.0, 10.0))
 
 
 # ==================== 似然概率计算 ====================
