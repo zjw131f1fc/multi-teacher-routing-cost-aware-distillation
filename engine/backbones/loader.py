@@ -41,6 +41,7 @@ BACKBONE_REGISTRY: Dict[str, Dict[str, Type[Any]]] = {
     },
     "llm": {
         "qwen2.5-0.5b-instruct": QwenLLMBackbone,
+        "qwen2.5-1.5b-instruct": QwenLLMBackbone,
     },
 }
 

@@ -121,6 +121,56 @@ def compute_nte_score(
     return float(np.clip(nte_scaled, 0.0, 10.0))
 
 
+# ==================== 文本预处理 ====================
+
+def strip_cot_tags(text: str) -> str:
+    """去除常见的 Chain-of-Thought 标签，保留内容。
+
+    处理的标签包括:
+    - <think>...</think>  (DeepSeek-R1)
+    - <cot>...</cot>
+    - <reasoning>...</reasoning>
+    - <scratchpad>...</scratchpad>
+    - |begin_of_thought|...|end_of_thought|
+
+    Args:
+        text: 原始响应文本
+
+    Returns:
+        去除标签后的文本，保留标签内的内容
+    """
+    import re
+
+    # 定义要去除的标签对 (opening_tag, closing_tag)
+    tag_patterns = [
+        # XML 风格标签
+        (r'<think>', r'</think>'),
+        (r'<cot>', r'</cot>'),
+        (r'<reasoning>', r'</reasoning>'),
+        (r'<scratchpad>', r'</scratchpad>'),
+        (r'<thought>', r'</thought>'),
+        (r'<reflection>', r'</reflection>'),
+        # 特殊分隔符风格
+        (r'\|begin_of_thought\|', r'\|end_of_thought\|'),
+        (r'\|startofthought\|', r'\|endofthought\|'),
+    ]
+
+    result = text
+    for open_tag, close_tag in tag_patterns:
+        # 使用正则表达式去除标签但保留内容
+        # 模式: <tag>content</tag> -> content
+        pattern = f'{open_tag}(.*?){close_tag}'
+        result = re.sub(pattern, r'\1', result, flags=re.DOTALL | re.IGNORECASE)
+
+    # 清理多余的空白行（保留最多两个连续换行）
+    result = re.sub(r'\n{3,}', '\n\n', result)
+
+    # 去除首尾空白
+    result = result.strip()
+
+    return result
+
+
 # ==================== 似然概率计算 ====================
 
 def compute_sequence_likelihood(
@@ -283,6 +333,7 @@ def collect_student_scores(config_path: str = "configs/step1_collect_scores.yaml
     logger.info(f"Beta 归一化常数 Z = {Z:.6f} (α={alpha}, β={beta})")
     logger.info(f"NTE 指数参数: quality_power={quality_power}, proximity_power={proximity_power}")
     logger.info(f"NTE Quality Floor: {quality_floor} (低质量响应保留 {quality_floor*100:.0f}% 权重)")
+    logger.info("预处理: 去除 CoT 标签 (<think>, <cot>, <reasoning> 等)")
 
     # 收集所有样本的分数
     all_scores = []
@@ -314,6 +365,12 @@ def collect_student_scores(config_path: str = "configs/step1_collect_scores.yaml
             for msg in messages:
                 if msg.get("role") == "assistant":
                     response_text = msg.get("content", "")
+
+            if not response_text:
+                continue
+
+            # 预处理：去除 CoT 标签（如 <think>、<cot> 等）
+            response_text = strip_cot_tags(response_text)
 
             if not response_text:
                 continue

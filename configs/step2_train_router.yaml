@@ -3,43 +3,59 @@
 global_settings:
   seed: 42
   device: "cuda"
-  dtype: "float"
+  dtype: "float"  # 使用 FP32 训练（最稳定）
   pytorch_cuda_alloc_conf: "expandable_segments:True"
   dataset_cache_dir: "/data/users/zjw/dataset_cache"
   hf_cache_dir: "/data/users/zjw/huggingface_cache"
+  study_name: "step2_train_router"
 
 config_settings:
   enable_dict_overrides: true
   enable_yaml_overrides: true
   log_config_on_load: true
 
+manager_settings:
+  name: "basic"
+  mode: "direct"  # direct模式：单任务直接运行
+  num_subtasks: 1
+  available_gpus: [0,1,2,3]
+  gpus_per_subtask: 4
+  poll_interval: 5.0
+
 dataset_settings:
   type: "distill"
   name: "distill-openr1-math"
   distill_settings:
     split:
-      train: 10000   # 训练集样本数
-      test: 1000     # 测试集样本数
+      train: 'all'   # 从HF加载的训练数据总量
+      test: -1       # 占位符，不使用
 
 backbone_settings:
   type: "llm"
   name: "qwen2.5-1.5b-instruct"
   model_id: "Qwen/Qwen2.5-1.5B-Instruct"  # HuggingFace 模型 ID
   llm_settings:
-    device_map: "auto"
+    device_map: "balanced"  # 使用单个GPU，避免多GPU分布导致的设备不匹配问题
 
 trainer_settings:
   type: "dl"
-  name: "pytorch"
+  name: "basic-pytorch"
   dl_settings:
     batch_size: 8              # 批次大小
-    num_epochs: 5              # 训练轮数
-    learning_rate: 5.0e-5      # 学习率 (全量微调建议较小)
-    weight_decay: 0.01         # 权重衰减
-    warmup_ratio: 0.1          # warmup 比例
-    gradient_clip: 1.0         # 梯度裁剪
-    eval_every_n_epochs: 1     # 每 N 个 epoch 评估一次
-    save_every_n_epochs: 1     # 每 N 个 epoch 保存一次
+    epochs: 5                  # 训练轮数
+    print_loss_every_batches: 10  # 每10个batch打印loss
+    eval_every_batches: 50      # 0表示不按batch评估
+    save_every_batches: 0      # 0表示不按batch保存
+    save_every_epochs: 1       # 每1个epoch保存一次
+    eval_max_samples: 0        # 0表示全量评估
+    grad_clip_max_norm: 1.0    # 梯度裁剪阈值
+
+    # 优化器配置
+    optimizers:
+      router:
+        type: "adam"
+        lr: 1.0e-5  # FP32 训练可以用更高的学习率
+        weight_decay: 0.01
 
 method_settings:
   # Study name (用于日志标识和checkpoint保存)

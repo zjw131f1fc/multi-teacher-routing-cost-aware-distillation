@@ -47,18 +47,31 @@ class QwenLLMBackbone(BaseLLMBackbone):
             model_name = self.model_name
             model_map = {
                 "qwen2.5-0.5b-instruct": "Qwen/Qwen2.5-0.5B-Instruct",
+                "qwen2.5-1.5b-instruct": "Qwen/Qwen2.5-1.5B-Instruct",
             }
             model_id = model_map.get(model_name, "Qwen/Qwen2.5-0.5B-Instruct")
 
         logger.info(f"Loading Qwen LLM: {model_id}...")
         device_map = self.llm_cfg.get("device_map", "auto")
 
-        # 根据设备选择 dtype
+        # 从全局配置获取 dtype
+        dtype_str = self.config.global_settings.get("dtype", "float16")
+        dtype_map = {
+            "float32": torch.float32,
+            "float": torch.float32,
+            "float16": torch.float16,
+            "half": torch.float16,
+            "bfloat16": torch.bfloat16,
+            "bf16": torch.bfloat16,
+        }
+        model_dtype = dtype_map.get(dtype_str, torch.float16)
+
+        # 如果是 CPU，强制使用 FP32
         if device_map == "cpu" or self.device == "cpu":
             model_dtype = torch.float32
             device_map = "cpu"
-        else:
-            model_dtype = torch.float16
+
+        logger.info(f"Using dtype: {model_dtype}")
 
         # 加载模型
         self.model = AutoModelForCausalLM.from_pretrained(

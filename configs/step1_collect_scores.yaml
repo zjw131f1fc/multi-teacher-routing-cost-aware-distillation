@@ -42,9 +42,9 @@ method_settings:
   nte_beta: 0.5   # Beta 分布参数 β (考虑不确定性)
 
   # NTE 指数平滑参数: V_soft = ε + (1-ε)×V, NTE = V_soft^α × M_prox^β
-  nte_quality_power: 0.3     # 质量分数的指数 α (推荐 0.3, 更重视可学习性)
-  nte_proximity_power: 0.7   # 可学习性分数的指数 β (推荐 0.7, 主导作用)
-  nte_quality_floor: 0.1     # 质量分数下限 ε (default=0.1, 低质量响应保留 10% 权重)
+  nte_quality_power: 0.5     # 质量分数的指数 α (推荐 0.3, 更重视可学习性)
+  nte_proximity_power: 0.5   # 可学习性分数的指数 β (推荐 0.7, 主导作用)
+  nte_quality_floor: 0.3     # 质量分数下限 ε (default=0.1, 低质量响应保留 30% 权重)
 
   # 质量分数的 reward key
   reward_key: "math_verify"  # 从 rewards 中提取哪个 key 作为质量分数

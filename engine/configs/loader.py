@@ -204,6 +204,7 @@ BACKBONE_DIM_MAP = {
     "qwen-2.5-3b": {"hidden_dim": 2048, "vision_dim": 2048},
     "llava-1.5-7b": {"hidden_dim": 4096, "vision_dim": 1024},
     "qwen2.5-0.5b-instruct": {"hidden_dim": 896},  # LLM, no vision_dim
+    "qwen2.5-1.5b-instruct": {"hidden_dim": 1536},  # LLM, no vision_dim
 }
 
 

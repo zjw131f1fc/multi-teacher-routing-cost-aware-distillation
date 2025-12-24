@@ -20,6 +20,26 @@ from engine.trainers.loader import load_trainer
 from methods.step2_router import RouterRegressor, train_step, eval_step
 
 
+# ==================== Prompt 模板 ====================
+
+ROUTER_PROMPT_TEMPLATE = """Analyze the following problem and determine which AI model would be most suitable to answer it.
+
+Problem:
+{instruction}
+
+Analysis:"""
+
+
+def build_router_prompt(instruction: str) -> str:
+    """构建路由器的输入prompt
+
+    通过明确任务目标（判断哪个教师模型更适合），
+    引导LLM理解路由任务，使得last token的hidden state
+    包含对问题的分析和模型适配性的判断信息。
+    """
+    return ROUTER_PROMPT_TEMPLATE.format(instruction=instruction)
+
+
 # ==================== 数据准备 ====================
 
 def collate_fn(batch, tokenizer, required_teachers, max_seq_length=512):
@@ -39,11 +59,12 @@ def collate_fn(batch, tokenizer, required_teachers, max_seq_length=512):
             "masks": [batch, num_teachers]
         }
     """
-    instructions = [sample["instruction"] for sample in batch]
+    # 为每个instruction添加prompt
+    prompts = [build_router_prompt(sample["instruction"]) for sample in batch]
 
     # Tokenize
     encodings = tokenizer(
-        instructions,
+        prompts,
         padding=True,
         truncation=True,
         max_length=max_seq_length,
@@ -214,6 +235,34 @@ def preload_fn(config: Dict) -> Dict[str, Any]:
 
     logger.info("数据准备完成!")
 
+    # ==================== 手动划分训练集和验证集 ====================
+    logger.info("手动划分训练集和验证集...")
+
+    train_split = dataset_bundle["splits"]["train"]
+    train_samples = train_split.samples
+
+    # 划分比例: 80% train, 20% val
+    total = len(train_samples)
+    train_size = int(total * 0.8)
+
+    # 随机打乱并划分
+    import random
+    random.seed(config["global_settings"]["seed"])
+    shuffled_samples = train_samples.copy()
+    random.shuffle(shuffled_samples)
+
+    train_data = shuffled_samples[:train_size]
+    val_data = shuffled_samples[train_size:]
+
+    logger.info(f"原始训练数据: {total} 样本")
+    logger.info(f"划分后 - 训练集: {len(train_data)} 样本")
+    logger.info(f"划分后 - 验证集: {len(val_data)} 样本")
+
+    # 重新打包为 dataset
+    from engine.datas.base.distill import DistillDataset
+    dataset_bundle["splits"]["train"] = DistillDataset(train_data)
+    dataset_bundle["splits"]["val"] = DistillDataset(val_data)
+
     return {
         "dataset_bundle": dataset_bundle
     }
@@ -251,11 +300,28 @@ def run_fn(config: Dict, cache: Dict[str, Any]) -> Dict[str, Any]:
         num_teachers=num_teachers,
         hidden_dim=hidden_dim,
         dropout=method_cfg.get("dropout", 0.1)
-    ).to(device)
+    )
+    # 注意：不要对router调用.to(device)，因为LLM已经通过device_map分布了
+    # 回归头会在__init__中自动放到正确的设备上
+
+    # 重新组织数据集: 将 val 作为 test 传给 trainer
+    # Trainer 的 evaluate() 方法会使用 splits["test"]
+    logger.info("重新组织数据集: 使用 val 作为评估集...")
+    reorganized_bundle = {
+        "splits": {
+            "train": dataset_bundle["splits"]["train"],
+            "test": dataset_bundle["splits"]["val"]  # 使用 val 作为评估集
+        },
+        "meta": dataset_bundle["meta"],
+        "judge": dataset_bundle.get("judge")
+    }
+
+    logger.info(f"训练集大小: {len(reorganized_bundle['splits']['train'])}")
+    logger.info(f"验证集大小: {len(reorganized_bundle['splits']['test'])}")
 
     # 创建 Trainer
     logger.info("创建 Trainer...")
-    trainer = load_trainer(config, dataset_bundle)
+    trainer = load_trainer(config, reorganized_bundle)
 
     # 注册模型
     trainer.register_model("router", router)
@@ -266,25 +332,11 @@ def run_fn(config: Dict, cache: Dict[str, Any]) -> Dict[str, Any]:
     # 创建优化器
     trainer.setup_optimizers()
 
-    # 自定义 collate_fn
-    def custom_collate(batch):
-        return collate_fn(batch, llm_backbone.tokenizer, required_teachers, max_seq_length)
-
-    # 设置 collate_fn (通过修改 trainer 的 dataloaders)
-    # 注意: 这里需要重新创建 DataLoader
-    for split_name, split_dataset in dataset_bundle["splits"].items():
-        batch_size = config["trainer_settings"]["dl_settings"]["batch_size"]
-        shuffle = (split_name == "train")
-
-        dataloader = DataLoader(
-            split_dataset,
-            batch_size=batch_size,
-            shuffle=shuffle,
-            collate_fn=custom_collate,
-            num_workers=0  # 避免多进程问题
-        )
-
-        trainer.dataloaders[split_name] = dataloader
+    # 将tokenizer和相关配置传递给train_step和eval_step (通过info字典)
+    # 在trainer中注册额外信息
+    trainer.register_model("tokenizer", llm_backbone.tokenizer)
+    trainer.register_model("required_teachers", required_teachers)
+    trainer.register_model("max_seq_length", max_seq_length)
 
     # 注册训练和评估步骤
     trainer.register_train_step(train_step)
@@ -321,12 +373,28 @@ def main():
     logger.info("Step 2: 训练路由模型")
     logger.info("=" * 60)
 
-    # 不使用 Manager，直接执行
-    cache = preload_fn(config)
-    result = run_fn(config, cache)
+    # 使用 Manager 的 direct 模式
+    from engine.managers.loader import load_manager
 
+    manager = load_manager(
+        config=config,
+        preload_fn=preload_fn,
+        run_fn=run_fn,
+        task_generator_fn=None,  # 单任务模式（direct模式）
+        result_handler_fn=None
+    )
+
+    # 启动训练
+    manager.start()
+    manager.wait()
+
+    # 获取结果摘要
+    summary = manager.get_summary()
     logger.info("=" * 60)
     logger.info("训练完成!")
+    logger.info(f"总任务数: {summary['total_tasks']}")
+    logger.info(f"已完成: {summary['completed']}")
+    logger.info(f"失败: {summary['failed']}")
     logger.info("=" * 60)
 
 
