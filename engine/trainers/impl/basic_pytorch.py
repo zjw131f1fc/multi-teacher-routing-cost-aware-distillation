@@ -503,6 +503,8 @@ class BasicPytorchTrainer:
 
         loader = self._make_loader(sub_ds, shuffle=False)
         agg: Dict[str, float] = {}
+        # 专门累积桶分布统计
+        bucket_dist_accum = {}  # {teacher_name: {"predicted_counts": [...], "ground_truth_counts": [...]}}
         n = 0
         for i, batch in enumerate(tqdm(loader, desc="Evaluate")):
             info = {
@@ -518,18 +520,82 @@ class BasicPytorchTrainer:
                 "persistent_state": self.persistent_state,
             }
             metrics = self.eval_fn(batch, self.device, info)
-            # 简单加和求平均
+
+            # 处理 teacher_bucket_dist（如果存在）
+            if "teacher_bucket_dist" in metrics:
+                teacher_dist = metrics.pop("teacher_bucket_dist")  # 从metrics中移除
+                # 累积每个教师的桶counts
+                for teacher_name, counts_dict in teacher_dist.items():
+                    if teacher_name not in bucket_dist_accum:
+                        bucket_dist_accum[teacher_name] = {
+                            "predicted_counts": [0] * len(counts_dict["predicted_counts"]),
+                            "ground_truth_counts": [0] * len(counts_dict["ground_truth_counts"])
+                        }
+                    # 累加counts
+                    for j, count in enumerate(counts_dict["predicted_counts"]):
+                        bucket_dist_accum[teacher_name]["predicted_counts"][j] += count
+                    for j, count in enumerate(counts_dict["ground_truth_counts"]):
+                        bucket_dist_accum[teacher_name]["ground_truth_counts"][j] += count
+
+            # 处理其他标量指标
             for k, v in metrics.items():
-                if k in agg:
-                    agg[k] = agg[k] + float(v)
-                else:
-                    agg[k] = float(v)
+                # 检查是否为标量（可以转换为float）
+                try:
+                    float_v = float(v)
+                    # 标量指标：加和求平均
+                    if k in agg:
+                        agg[k] = agg[k] + float_v
+                    else:
+                        agg[k] = float_v
+                except (TypeError, ValueError):
+                    # 其他非标量指标：保留最后一个值
+                    agg[k] = v
             n += 1
+
+        # 标量指标求平均
         if n > 0:
             for k in list(agg.keys()):
-                agg[k] /= n
+                if isinstance(agg[k], (int, float)):
+                    agg[k] /= n
+
+        # 计算桶分布的百分比并添加到结果中
+        if bucket_dist_accum:
+            teacher_bucket_distributions = {}
+            for teacher_name, counts_dict in bucket_dist_accum.items():
+                pred_counts = counts_dict["predicted_counts"]
+                true_counts = counts_dict["ground_truth_counts"]
+
+                total_pred = sum(pred_counts)
+                total_true = sum(true_counts)
+
+                pred_percentages = [c / total_pred * 100 if total_pred > 0 else 0 for c in pred_counts]
+                true_percentages = [c / total_true * 100 if total_true > 0 else 0 for c in true_counts]
+
+                teacher_bucket_distributions[teacher_name] = {
+                    "predicted": {
+                        "counts": pred_counts,
+                        "percentages": pred_percentages
+                    },
+                    "ground_truth": {
+                        "counts": true_counts,
+                        "percentages": true_percentages
+                    }
+                }
+            agg["teacher_bucket_dist"] = teacher_bucket_distributions
+
         if self.logger:
-            self.logger.info(f"评估完成: {agg}")
+            # 分离标量和非标量指标打印
+            scalar_metrics = {k: v for k, v in agg.items() if k != "teacher_bucket_dist"}
+            self.logger.info(f"评估完成 (标量指标): {scalar_metrics}")
+
+            # 桶分布统计单独打印
+            if "teacher_bucket_dist" in agg:
+                self.logger.info("评估完成 (桶分布统计):")
+                for teacher_name, dist in agg["teacher_bucket_dist"].items():
+                    self.logger.info(f"  {teacher_name}:")
+                    self.logger.info(f"    预测分布: counts={dist['predicted']['counts']}, percentages={[f'{p:.1f}%' for p in dist['predicted']['percentages']]}")
+                    self.logger.info(f"    真实分布: counts={dist['ground_truth']['counts']}, percentages={[f'{p:.1f}%' for p in dist['ground_truth']['percentages']]}")
+
         return agg
 
     # ---------------------- Checkpoint 保存 ----------------------

@@ -235,6 +235,89 @@ def preload_fn(config: Dict) -> Dict[str, Any]:
 
     logger.info("数据准备完成!")
 
+    # ==================== 自适应桶划分（教师特定）====================
+    required_teachers = config["method_settings"].get("required_teachers", [])
+    use_bucketing = config["method_settings"].get("use_bucketing", False)
+    adaptive_bucketing = config["method_settings"].get("adaptive_bucketing", False)
+
+    if use_bucketing and adaptive_bucketing:
+        logger.info("="*80)
+        logger.info("自适应桶划分（教师特定）: 为每个教师独立分桶")
+        logger.info("="*80)
+
+        # 收集每个教师的NTE分数（分别存储）
+        teacher_scores = {teacher: [] for teacher in required_teachers}
+        train_split = dataset_bundle["splits"]["train"]
+
+        for sample in train_split:
+            responses = sample.get("responses", {})
+            for teacher_name in required_teachers:
+                if (teacher_name in responses and
+                    "nte_scores" in responses[teacher_name]):
+                    nte_score = responses[teacher_name]["nte_scores"]["nte_score"]
+                    teacher_scores[teacher_name].append(nte_score)
+
+        # 检查是否有足够的数据
+        valid_teachers = {k: v for k, v in teacher_scores.items() if len(v) > 0}
+
+        if len(valid_teachers) > 0:
+            import numpy as np
+            from methods.step2_router.adaptive_bucketing import adaptive_bucketing_per_teacher
+
+            # 转换为 numpy arrays
+            teacher_scores_np = {k: np.array(v) for k, v in valid_teachers.items()}
+
+            # 获取分桶配置
+            num_buckets = config["method_settings"].get("num_buckets", 5)
+            bucketing_method = config["method_settings"].get("bucketing_method", "kmeans")
+            balance_weight = config["method_settings"].get("bucketing_balance_weight", 0.0)
+
+            logger.info(f"桶数量: {num_buckets}")
+            logger.info(f"分桶方法: {bucketing_method}")
+            logger.info(f"均匀性权重: {balance_weight}")
+
+            # 为每个教师独立计算分桶
+            bucketing_results = adaptive_bucketing_per_teacher(
+                teacher_scores=teacher_scores_np,
+                num_buckets=num_buckets,
+                method=bucketing_method,
+                balance_weight=balance_weight,
+                logger=logger
+            )
+
+            # 提取每个教师的桶配置
+            teacher_bucket_ranges = {}
+            teacher_bucket_centers = {}
+
+            for teacher_name, result in bucketing_results.items():
+                teacher_bucket_ranges[teacher_name] = result["bucket_ranges"]
+                teacher_bucket_centers[teacher_name] = result["bucket_centers"]
+
+            # 更新配置（保存教师特定的桶配置）
+            config["method_settings"]["num_buckets"] = num_buckets
+            config["method_settings"]["teacher_bucket_ranges"] = teacher_bucket_ranges
+            config["method_settings"]["teacher_bucket_centers"] = teacher_bucket_centers
+
+            logger.info(f"\n已更新配置为教师特定分桶:")
+            logger.info(f"  num_buckets: {num_buckets}")
+            for teacher_name in required_teachers:
+                if teacher_name in teacher_bucket_ranges:
+                    logger.info(f"  {teacher_name}:")
+                    logger.info(f"    bucket_ranges: {[round(x, 2) for x in teacher_bucket_ranges[teacher_name]]}")
+                    logger.info(f"    bucket_centers: {[round(x, 2) for x in teacher_bucket_centers[teacher_name]]}")
+        else:
+            logger.warning("未找到任何教师的NTE分数，无法计算自适应桶边界")
+            logger.warning("将使用配置文件中的固定桶边界（如果有）")
+    elif use_bucketing:
+        # 如果没有开启自适应分桶，检查是否已配置教师特定桶边界
+        if "teacher_bucket_ranges" in config["method_settings"]:
+            logger.info("使用配置文件中的教师特定桶边界")
+        else:
+            logger.info("使用配置文件中的固定桶边界（所有教师共享）")
+            logger.info(f"  bucket_ranges: {config['method_settings'].get('bucket_ranges')}")
+
+    logger.info("="*80)
+
     # ==================== 手动划分训练集和验证集 ====================
     logger.info("手动划分训练集和验证集...")
 
@@ -295,12 +378,87 @@ def run_fn(config: Dict, cache: Dict[str, Any]) -> Dict[str, Any]:
 
     # 创建 RouterRegressor
     logger.info("创建 RouterRegressor...")
-    router = RouterRegressor(
-        llm_backbone=llm_backbone,
-        num_teachers=num_teachers,
-        hidden_dim=hidden_dim,
-        dropout=method_cfg.get("dropout", 0.1)
-    )
+
+    # 获取桶化配置
+    use_bucketing = method_cfg.get("use_bucketing", False)
+    use_score_diff = method_cfg.get("use_score_diff", False)
+    num_buckets = method_cfg.get("num_buckets", 5)
+
+    # 检查互斥性
+    if use_bucketing and use_score_diff:
+        raise ValueError("use_bucketing 和 use_score_diff 不能同时为 True，请只选择一个模式")
+
+    # 检查是否使用教师特定分桶
+    teacher_bucket_ranges = method_cfg.get("teacher_bucket_ranges", None)
+    teacher_bucket_centers = method_cfg.get("teacher_bucket_centers", None)
+
+    # 向后兼容：如果没有教师特定配置，尝试使用共享配置
+    if teacher_bucket_ranges is None:
+        shared_bucket_ranges = method_cfg.get("bucket_ranges", None)
+        if shared_bucket_ranges is not None:
+            logger.info("使用共享桶边界（所有教师共享）")
+            teacher_bucket_ranges = {teacher: shared_bucket_ranges for teacher in required_teachers}
+
+    if teacher_bucket_centers is None:
+        shared_bucket_centers = method_cfg.get("bucket_centers", None)
+        if shared_bucket_centers is not None:
+            logger.info("使用共享桶中心（所有教师共享）")
+            teacher_bucket_centers = {teacher: shared_bucket_centers for teacher in required_teachers}
+
+    if use_bucketing:
+        logger.info(f"使用桶化分类模式: {num_buckets} 个桶")
+        if teacher_bucket_ranges is not None:
+            logger.info("桶配置（教师特定）:")
+            for teacher in required_teachers:
+                if teacher in teacher_bucket_ranges:
+                    logger.info(f"  {teacher}: {[round(x, 2) for x in teacher_bucket_ranges[teacher]]}")
+        else:
+            logger.warning("未找到桶边界配置！")
+    elif use_score_diff:
+        logger.info("使用分数差预测模式（仅支持2个教师）")
+        if num_teachers != 2:
+            raise ValueError(f"分数差预测模式仅支持 2 个教师，当前教师数量: {num_teachers}")
+
+        # 根据教师名字获取索引
+        strong_teacher_name = method_cfg.get("strong_teacher_name", required_teachers[0])
+        if strong_teacher_name not in required_teachers:
+            raise ValueError(
+                f"强教师名字 '{strong_teacher_name}' 不在 required_teachers 列表中: {required_teachers}"
+            )
+
+        strong_teacher_idx = required_teachers.index(strong_teacher_name)
+        weak_teacher_idx = 1 - strong_teacher_idx
+        weak_teacher_name = required_teachers[weak_teacher_idx]
+
+        logger.info(f"强教师: {strong_teacher_name} (索引 {strong_teacher_idx})")
+        logger.info(f"弱教师: {weak_teacher_name} (索引 {weak_teacher_idx})")
+    else:
+        logger.info("使用回归模式")
+
+    # 获取 pooling 策略
+    pooling_strategy = method_cfg.get("pooling_strategy", "mean")
+    logger.info(f"Pooling 策略: {pooling_strategy}")
+
+    # 创建模型参数
+    model_kwargs = {
+        "llm_backbone": llm_backbone,
+        "num_teachers": num_teachers,
+        "hidden_dim": hidden_dim,
+        "dropout": method_cfg.get("dropout", 0.1),
+        "pooling_strategy": pooling_strategy
+    }
+
+    # 根据模式添加特定参数
+    if use_score_diff:
+        model_kwargs["use_score_diff"] = True
+        model_kwargs["strong_teacher_idx"] = method_cfg.get("strong_teacher_idx", 0)
+    elif use_bucketing:
+        model_kwargs["use_bucketing"] = True
+        model_kwargs["num_buckets"] = num_buckets
+        model_kwargs["teacher_bucket_ranges"] = teacher_bucket_ranges
+        model_kwargs["teacher_bucket_centers"] = teacher_bucket_centers
+
+    router = RouterRegressor(**model_kwargs)
     # 注意：不要对router调用.to(device)，因为LLM已经通过device_map分布了
     # 回归头会在__init__中自动放到正确的设备上
 
@@ -337,6 +495,7 @@ def run_fn(config: Dict, cache: Dict[str, Any]) -> Dict[str, Any]:
     trainer.register_model("tokenizer", llm_backbone.tokenizer)
     trainer.register_model("required_teachers", required_teachers)
     trainer.register_model("max_seq_length", max_seq_length)
+    # 注意：config 已经在 info 中，不需要手动注册
 
     # 注册训练和评估步骤
     trainer.register_train_step(train_step)
