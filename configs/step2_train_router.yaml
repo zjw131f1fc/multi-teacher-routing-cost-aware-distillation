@@ -1,10 +1,9 @@
-# Step2: 训练路由模型配置
+# Step2: 训练路由模型配置（使用 DeBERTa Encoder，回归模式）
 
 global_settings:
   seed: 42
   device: "cuda"
-  dtype: "float"  # 使用 FP32 训练（最稳定）
-  pytorch_cuda_alloc_conf: "expandable_segments:True"
+  dtype: "float32"  # 使用 FP32 训练（最稳定）
   dataset_cache_dir: "/data/users/zjw/dataset_cache"
   hf_cache_dir: "/data/users/zjw/huggingface_cache"
   study_name: "step2_train_router"
@@ -18,7 +17,7 @@ manager_settings:
   name: "basic"
   mode: "direct"  # direct模式：单任务直接运行
   num_subtasks: 1
-  available_gpus: [0,1,2,3]
+  available_gpus: [0]
   gpus_per_subtask: 4
   poll_interval: 5.0
 
@@ -31,35 +30,42 @@ dataset_settings:
       test: -1       # 占位符，不使用
 
 backbone_settings:
-  type: "llm"
-  name: "qwen2.5-1.5b-instruct"
-  model_id: "Qwen/Qwen2.5-1.5B-Instruct"  # HuggingFace 模型 ID
-  llm_settings:
-    device_map: "balanced"  # 使用单个GPU，避免多GPU分布导致的设备不匹配问题
+  type: "encoder"
+  name: "deberta-v3-base"
+  model_id: "microsoft/deberta-v3-base"  # HuggingFace 模型 ID
+  encoder_settings:
+    device_map: "auto"  # 自动分配设备
+    pooling_mode: "mean"  # 使用 mean pooling
+    hidden_dim: 768  # DeBERTa-v3-base 的 hidden dimension
 
 trainer_settings:
   type: "dl"
   name: "basic-pytorch"
   dl_settings:
-    batch_size: 16              # 批次大小
-    epochs: 80                  # 训练轮数
+    batch_size: 32              # 批次大小（DeBERTa 比 LLM 小，可以用更大的 batch）
+    epochs: 50                  # 训练轮数
     print_loss_every_batches: 10  # 每10个batch打印loss
-    eval_every_batches: 50      # 0表示不按batch评估
+    eval_every_batches: 50      # 每50个batch评估一次
     save_every_batches: 0      # 0表示不按batch保存
     save_every_epochs: 1       # 每1个epoch保存一次
     eval_max_samples: 0        # 0表示全量评估
-    grad_clip_max_norm: null    # 梯度裁剪阈值
+    grad_clip_max_norm: 1.0    # 梯度裁剪阈值
+
+    # Learning rate scheduler 配置
+    use_warmup: true           # 是否使用 warmup
+    warmup_ratio: 0.1          # warmup 占总步数的比例（10%）
+    # warmup_steps: 500        # 或者直接指定 warmup 步数（如果设置了则忽略 warmup_ratio）
 
     # 优化器配置
     optimizers:
       router:
-        type: "adam"
-        lr: 5.0e-5  # FP32 训练可以用更高的学习率
+        type: "adamw"
+        lr: 2.0e-4  # DeBERTa 微调推荐学习率
         weight_decay: 0.01
 
 method_settings:
   # Study name (用于日志标识和checkpoint保存)
-  study_name: "step2_train_router"
+  study_name: "step2_train_router_deberta"
 
   # 必需的教师列表（需要与 Step1 一致）
   required_teachers:
@@ -67,34 +73,4 @@ method_settings:
     - "qwen2.5-math-7b-instruct"
 
   # 模型参数
-  dropout: 0               # Dropout rate
-  max_seq_length: 512        # 最大序列长度
-  pooling_strategy: "last"   # Pooling策略: "mean"(平均池化) 或 "last"(最后token)
-                             # 推荐: 分数差模式使用"last"，因为prompt末尾是"Score difference:"
-
-  # 桶化分类配置
-  use_bucketing: false        # 是否使用桶化分类（false则使用回归）
-  adaptive_bucketing: true   # 是否使用自适应桶划分（基于K-Means最小化量化误差）
-
-  # 分数差预测模式（新增，仅支持2个教师）
-  use_score_diff: true      # 是否使用分数差预测模式（预测强教师分数+弱教师差值）
-                             # 注意: use_score_diff 和 use_bucketing 互斥，只能选一个
-  strong_teacher_name: "deepseek-r1"  # 强教师的名字（用于分数差模式）
-                                       # 必须是 required_teachers 中的一个
-                                       # 分数差模式仅支持2个教师！
-
-  # 分桶参数
-  num_buckets: 5             # 桶的数量（固定值）
-  bucketing_method: "kmeans" # 分桶方法: "kmeans"（量化误差最小）, "quantile"（样本均衡）, "uniform"（等宽桶）
-  bucketing_balance_weight: 0.6  # 均匀性权重（0到1之间）
-                                  # 0: 只考虑量化误差（默认）
-                                  # 1: 只考虑样本分布均匀性
-                                  # 0.5: 两者权重相等
-
-  # 自适应分桶配置（当 adaptive_bucketing=true 时使用）
-
-  # 固定桶配置（当 adaptive_bucketing=false 时使用，所有教师共享）
-  bucket_ranges: [0.2, 0.4, 0.6, 0.8]  # 固定桶边界（向后兼容），对应 [0, 1] 范围
-
-  # Focal Loss 配置（防止输出趋同）
-  focal_gamma: 3.0           # 聚焦参数，越大对易分类样本惩罚越强（0=普通CE，2.0=推荐值，3.0=更强）
+  dropout: 0.1               # Dropout rate

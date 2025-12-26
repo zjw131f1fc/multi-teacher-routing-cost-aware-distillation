@@ -49,10 +49,16 @@ class BasicPytorchTrainer:
         # 梯度裁剪设置
         self.grad_clip_max_norm = ts.get("grad_clip_max_norm")  # None 表示不裁剪，float 表示裁剪阈值
 
+        # Learning rate scheduler 设置
+        self.use_warmup = ts.get("use_warmup", False)
+        self.warmup_steps = int(ts.get("warmup_steps", 0))
+        self.warmup_ratio = float(ts.get("warmup_ratio", 0.0))  # warmup占总步数的比例（如果warmup_steps为0）
+
         # 优化器设定
         self.optim_cfg = ts["optimizers"]
         self.param_groups: Dict[str, _ParamGroupSpec] = {}
         self.optimizers: Dict[str, torch.optim.Optimizer] = {}
+        self.schedulers: Dict[str, Any] = {}  # Learning rate schedulers
 
         # 数据集
         self.dataset_bundle = dataset_bundle
@@ -122,16 +128,59 @@ class BasicPytorchTrainer:
         """根据已注册的参数组创建优化器。"""
         for name, spec in self.param_groups.items():
             if spec.opt_type == "adam":
-                opt = torch.optim.Adam(spec.params, lr=spec.lr)
+                weight_decay = float(spec.extra.get("weight_decay", 0.0))
+                opt = torch.optim.Adam(spec.params, lr=spec.lr, weight_decay=weight_decay)
+            elif spec.opt_type == "adamw":
+                weight_decay = float(spec.extra.get("weight_decay", 0.01))
+                opt = torch.optim.AdamW(spec.params, lr=spec.lr, weight_decay=weight_decay)
             elif spec.opt_type == "sgd":
                 momentum_val = spec.extra["momentum"] if "momentum" in spec.extra else 0.0
                 momentum = float(momentum_val)
-                opt = torch.optim.SGD(spec.params, lr=spec.lr, momentum=momentum)
+                weight_decay = float(spec.extra.get("weight_decay", 0.0))
+                opt = torch.optim.SGD(spec.params, lr=spec.lr, momentum=momentum, weight_decay=weight_decay)
             else:
                 raise ValueError(f"不支持的优化器类型: {spec.opt_type}")
             self.optimizers[name] = opt
             if self.logger:
                 self.logger.info(f"优化器就绪: {name} -> {spec.opt_type}")
+
+    def setup_schedulers(self, total_steps: int):
+        """设置 learning rate schedulers（在知道总步数后调用）
+
+        参数:
+            total_steps: 总训练步数
+        """
+        if not self.use_warmup:
+            return
+
+        # 计算 warmup 步数
+        if self.warmup_steps > 0:
+            warmup_steps = self.warmup_steps
+        else:
+            warmup_steps = int(total_steps * self.warmup_ratio)
+
+        if warmup_steps == 0:
+            if self.logger:
+                self.logger.info("Warmup 步数为 0，不使用 warmup")
+            return
+
+        if self.logger:
+            self.logger.info(f"设置 Warmup Scheduler: warmup_steps={warmup_steps}, total_steps={total_steps}")
+
+        # 为每个优化器创建 scheduler
+        for name, opt in self.optimizers.items():
+            # 使用 Linear Warmup + Constant LR
+            def lr_lambda(current_step: int):
+                if current_step < warmup_steps:
+                    # Warmup: 从 0 线性增长到 1
+                    return float(current_step) / float(max(1, warmup_steps))
+                # Warmup 后保持不变
+                return 1.0
+
+            scheduler = torch.optim.lr_scheduler.LambdaLR(opt, lr_lambda)
+            self.schedulers[name] = scheduler
+            if self.logger:
+                self.logger.info(f"Scheduler 就绪: {name} -> Linear Warmup ({warmup_steps} steps)")
 
     # ---------------------- 模型注册 ----------------------
     def register_model(self, name: str, model):
@@ -342,7 +391,10 @@ class BasicPytorchTrainer:
         loader = self._make_loader(train_ds, shuffle=True)
         batch_count = 0
         total_planned_batches = self.epochs * len(loader)
-        
+
+        # 设置 schedulers（在知道总步数后）
+        self.setup_schedulers(total_planned_batches)
+
         # 时间跟踪：用于预估剩余时间
         start_time = time.time()
         batch_times = []  # 记录最近若干batch的耗时
@@ -476,6 +528,13 @@ class BasicPytorchTrainer:
                     # 4. 组装完整消息
                     all_parts = grad_stats + loss_parts + metric_strs
 
+                    # 添加当前学习率（如果使用了scheduler）
+                    if len(self.schedulers) > 0:
+                        # 显示第一个优化器的学习率
+                        first_opt_name = list(self.optimizers.keys())[0]
+                        current_lr = self.optimizers[first_opt_name].param_groups[0]['lr']
+                        all_parts.append(f"lr={current_lr:.2e}")
+
                     # 5. 计算ETA
                     remaining_batches = total_planned_batches - batch_count
                     if len(batch_times) > 0 and remaining_batches > 0:
@@ -491,6 +550,10 @@ class BasicPytorchTrainer:
                 # 最后统一执行优化步骤
                 for opt in self.optimizers.values():
                     opt.step()
+
+                # 更新 learning rate scheduler
+                for scheduler in self.schedulers.values():
+                    scheduler.step()
 
                 batch_count += 1
 

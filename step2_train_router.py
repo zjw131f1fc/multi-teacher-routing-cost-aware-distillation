@@ -1,6 +1,6 @@
 """Step 2: 训练路由模型
 
-训练一个 Qwen-1.5B-Instruct 模型预测每个教师的 NTE 分数。
+训练一个 DeBERTa-v3-base 模型（全量微调）预测每个教师的 NTE 分数。
 
 使用方法:
     python step2_train_router.py --config configs/step2_train_router.yaml
@@ -31,75 +31,13 @@ Analysis:"""
 
 
 def build_router_prompt(instruction: str) -> str:
-    """构建路由器的输入prompt
-
-    通过明确任务目标（判断哪个教师模型更适合），
-    引导LLM理解路由任务，使得last token的hidden state
-    包含对问题的分析和模型适配性的判断信息。
-    """
+    """构建路由器的输入prompt"""
     return ROUTER_PROMPT_TEMPLATE.format(instruction=instruction)
 
 
 # ==================== 数据准备 ====================
 
-def collate_fn(batch, tokenizer, required_teachers, max_seq_length=512):
-    """批次数据处理函数
-
-    参数:
-        batch: list of samples from dataset
-        tokenizer: LLM tokenizer
-        required_teachers: list of teacher names
-        max_seq_length: 最大序列长度
-
-    返回:
-        {
-            "input_ids": [batch, seq_len],
-            "attention_mask": [batch, seq_len],
-            "target_scores": [batch, num_teachers],
-            "masks": [batch, num_teachers]
-        }
-    """
-    # 为每个instruction添加prompt
-    prompts = [build_router_prompt(sample["instruction"]) for sample in batch]
-
-    # Tokenize
-    encodings = tokenizer(
-        prompts,
-        padding=True,
-        truncation=True,
-        max_length=max_seq_length,
-        return_tensors="pt"
-    )
-
-    # 提取目标 NTE 分数
-    target_scores = []
-    masks = []
-
-    for sample in batch:
-        scores = []
-        mask = []
-
-        for teacher in required_teachers:
-            # 检查教师响应是否存在，且包含 nte_scores
-            if (teacher in sample.get("responses", {}) and
-                "nte_scores" in sample["responses"][teacher]):
-                nte_score = sample["responses"][teacher]["nte_scores"]["nte_score"]
-                scores.append(nte_score)
-                mask.append(1.0)
-            else:
-                # 没有分数，用0占位，mask标记为0
-                scores.append(0.0)
-                mask.append(0.0)
-
-        target_scores.append(scores)
-        masks.append(mask)
-
-    return {
-        "input_ids": encodings["input_ids"],
-        "attention_mask": encodings["attention_mask"],
-        "target_scores": torch.tensor(target_scores, dtype=torch.float32),
-        "masks": torch.tensor(masks, dtype=torch.float32)
-    }
+# collate_fn 已移除，不再需要手动 tokenization
 
 
 # ==================== 预加载函数 ====================
@@ -363,104 +301,30 @@ def run_fn(config: Dict, cache: Dict[str, Any]) -> Dict[str, Any]:
     method_cfg = config["method_settings"]
     required_teachers = method_cfg["required_teachers"]
     num_teachers = len(required_teachers)
-    max_seq_length = method_cfg.get("max_seq_length", 512)
 
     logger.info(f"教师列表: {required_teachers}")
     logger.info(f"教师数量: {num_teachers}")
 
-    # 加载 LLM Backbone
-    logger.info("加载 LLM Backbone...")
-    llm_backbone = load_backbone(config)
+    # 加载 DeBERTa Encoder Backbone
+    logger.info("加载 DeBERTa Encoder Backbone...")
+    encoder_backbone = load_backbone(config)
 
     # 获取 hidden_dim
-    hidden_dim = llm_backbone.model.config.hidden_size
+    hidden_dim = config["backbone_settings"]["encoder_settings"]["hidden_dim"]
     logger.info(f"Hidden dimension: {hidden_dim}")
 
-    # 创建 RouterRegressor
-    logger.info("创建 RouterRegressor...")
+    # 创建 RouterRegressor (回归模式)
+    logger.info("创建 RouterRegressor (回归模式)...")
 
-    # 获取桶化配置
-    use_bucketing = method_cfg.get("use_bucketing", False)
-    use_score_diff = method_cfg.get("use_score_diff", False)
-    num_buckets = method_cfg.get("num_buckets", 5)
-
-    # 检查互斥性
-    if use_bucketing and use_score_diff:
-        raise ValueError("use_bucketing 和 use_score_diff 不能同时为 True，请只选择一个模式")
-
-    # 检查是否使用教师特定分桶
-    teacher_bucket_ranges = method_cfg.get("teacher_bucket_ranges", None)
-    teacher_bucket_centers = method_cfg.get("teacher_bucket_centers", None)
-
-    # 向后兼容：如果没有教师特定配置，尝试使用共享配置
-    if teacher_bucket_ranges is None:
-        shared_bucket_ranges = method_cfg.get("bucket_ranges", None)
-        if shared_bucket_ranges is not None:
-            logger.info("使用共享桶边界（所有教师共享）")
-            teacher_bucket_ranges = {teacher: shared_bucket_ranges for teacher in required_teachers}
-
-    if teacher_bucket_centers is None:
-        shared_bucket_centers = method_cfg.get("bucket_centers", None)
-        if shared_bucket_centers is not None:
-            logger.info("使用共享桶中心（所有教师共享）")
-            teacher_bucket_centers = {teacher: shared_bucket_centers for teacher in required_teachers}
-
-    if use_bucketing:
-        logger.info(f"使用桶化分类模式: {num_buckets} 个桶")
-        if teacher_bucket_ranges is not None:
-            logger.info("桶配置（教师特定）:")
-            for teacher in required_teachers:
-                if teacher in teacher_bucket_ranges:
-                    logger.info(f"  {teacher}: {[round(x, 2) for x in teacher_bucket_ranges[teacher]]}")
-        else:
-            logger.warning("未找到桶边界配置！")
-    elif use_score_diff:
-        logger.info("使用分数差预测模式（仅支持2个教师）")
-        if num_teachers != 2:
-            raise ValueError(f"分数差预测模式仅支持 2 个教师，当前教师数量: {num_teachers}")
-
-        # 根据教师名字获取索引
-        strong_teacher_name = method_cfg.get("strong_teacher_name", required_teachers[0])
-        if strong_teacher_name not in required_teachers:
-            raise ValueError(
-                f"强教师名字 '{strong_teacher_name}' 不在 required_teachers 列表中: {required_teachers}"
-            )
-
-        strong_teacher_idx = required_teachers.index(strong_teacher_name)
-        weak_teacher_idx = 1 - strong_teacher_idx
-        weak_teacher_name = required_teachers[weak_teacher_idx]
-
-        logger.info(f"强教师: {strong_teacher_name} (索引 {strong_teacher_idx})")
-        logger.info(f"弱教师: {weak_teacher_name} (索引 {weak_teacher_idx})")
-    else:
-        logger.info("使用回归模式")
-
-    # 获取 pooling 策略
-    pooling_strategy = method_cfg.get("pooling_strategy", "mean")
-    logger.info(f"Pooling 策略: {pooling_strategy}")
-
-    # 创建模型参数
     model_kwargs = {
-        "llm_backbone": llm_backbone,
+        "encoder_backbone": encoder_backbone,
         "num_teachers": num_teachers,
         "hidden_dim": hidden_dim,
         "dropout": method_cfg.get("dropout", 0.1),
-        "pooling_strategy": pooling_strategy
+        "score_scale": 1.0
     }
 
-    # 根据模式添加特定参数
-    if use_score_diff:
-        model_kwargs["use_score_diff"] = True
-        model_kwargs["strong_teacher_idx"] = method_cfg.get("strong_teacher_idx", 0)
-    elif use_bucketing:
-        model_kwargs["use_bucketing"] = True
-        model_kwargs["num_buckets"] = num_buckets
-        model_kwargs["teacher_bucket_ranges"] = teacher_bucket_ranges
-        model_kwargs["teacher_bucket_centers"] = teacher_bucket_centers
-
     router = RouterRegressor(**model_kwargs)
-    # 注意：不要对router调用.to(device)，因为LLM已经通过device_map分布了
-    # 回归头会在__init__中自动放到正确的设备上
 
     # 重新组织数据集: 将 val 作为 test 传给 trainer
     # Trainer 的 evaluate() 方法会使用 splits["test"]
@@ -490,12 +354,8 @@ def run_fn(config: Dict, cache: Dict[str, Any]) -> Dict[str, Any]:
     # 创建优化器
     trainer.setup_optimizers()
 
-    # 将tokenizer和相关配置传递给train_step和eval_step (通过info字典)
-    # 在trainer中注册额外信息
-    trainer.register_model("tokenizer", llm_backbone.tokenizer)
+    # 注册额外信息（传递给train_step和eval_step）
     trainer.register_model("required_teachers", required_teachers)
-    trainer.register_model("max_seq_length", max_seq_length)
-    # 注意：config 已经在 info 中，不需要手动注册
 
     # 注册训练和评估步骤
     trainer.register_train_step(train_step)
