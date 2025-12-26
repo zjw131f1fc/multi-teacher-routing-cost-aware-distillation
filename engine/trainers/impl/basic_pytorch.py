@@ -353,6 +353,11 @@ class BasicPytorchTrainer:
         for epoch in range(self.epochs):
             if self.logger:
                 self.logger.info(f"Epoch {epoch+1}/{self.epochs}")
+
+            # 用于记录本epoch的所有loss
+            epoch_losses = {}  # {group_name: [loss1, loss2, ...]}
+            epoch_metrics = {}  # {metric_name: [val1, val2, ...]}
+
             for epoch_batch_idx, batch in enumerate(tqdm(loader, desc=f"Train E{epoch+1}")):
                 batch_start_time = time.time()
                 
@@ -398,6 +403,31 @@ class BasicPytorchTrainer:
                     for group_name, spec in self.param_groups.items():
                         torch.nn.utils.clip_grad_norm_(spec.params, self.grad_clip_max_norm)
 
+                # === 收集 epoch loss 和 metrics ===
+                metrics_info = outputs.get("metrics", {})
+                for group_name in self.optimizers.keys():
+                    group_out = outputs[group_name]
+                    if isinstance(group_out, dict):
+                        # 收集每个loss分量
+                        for k, v in group_out.items():
+                            loss_key = f"{group_name}.{k}"
+                            loss_val = float(v.detach() if isinstance(v, torch.Tensor) else v)
+                            if loss_key not in epoch_losses:
+                                epoch_losses[loss_key] = []
+                            epoch_losses[loss_key].append(loss_val)
+                    else:
+                        # 单个loss
+                        loss_val = float(group_out.detach() if isinstance(group_out, torch.Tensor) else group_out)
+                        if group_name not in epoch_losses:
+                            epoch_losses[group_name] = []
+                        epoch_losses[group_name].append(loss_val)
+
+                # 收集 metrics
+                for metric_name, metric_val in metrics_info.items():
+                    if metric_name not in epoch_metrics:
+                        epoch_metrics[metric_name] = []
+                    epoch_metrics[metric_name].append(float(metric_val))
+
                 # === 收集要打印的所有信息（梯度 + Loss + Metrics） ===
                 if self.print_loss_every_batches and batch_count % self.print_loss_every_batches == 0:
                     # 1. 收集梯度信息
@@ -439,6 +469,10 @@ class BasicPytorchTrainer:
                         metric_strs.append(f"disc_R={metrics_info['disc_real_acc']:.3f}")
                         metric_strs.append(f"disc_F={metrics_info['disc_fake_acc']:.3f}")
 
+                    # Top-1准确率（路由器）
+                    if "top1_acc" in metrics_info:
+                        metric_strs.append(f"top1={metrics_info['top1_acc']:.3f}")
+
                     # 4. 组装完整消息
                     all_parts = grad_stats + loss_parts + metric_strs
 
@@ -476,6 +510,26 @@ class BasicPytorchTrainer:
                 # 每隔 N 个 batch 保存检查点
                 if self.save_every_batches and batch_count % self.save_every_batches == 0:
                     self._save_checkpoint(epoch=epoch, batch=batch_count)
+
+            # === Epoch 结束：打印平均 loss 和 metrics ===
+            if self.logger and epoch_losses:
+                import numpy as np
+
+                # 计算平均 loss
+                loss_summary = []
+                for loss_name, loss_values in epoch_losses.items():
+                    avg_loss = np.mean(loss_values)
+                    loss_summary.append(f"{loss_name}={avg_loss:.4f}")
+
+                # 计算平均 metrics
+                metric_summary = []
+                for metric_name, metric_values in epoch_metrics.items():
+                    avg_metric = np.mean(metric_values)
+                    metric_summary.append(f"{metric_name}={avg_metric:.3f}")
+
+                # 打印
+                summary_parts = loss_summary + metric_summary
+                self.logger.info(f"[Epoch {epoch+1} Summary] " + " | ".join(summary_parts))
 
             # 每隔 N 个 epoch 保存检查点
             if self.save_every_epochs and (epoch + 1) % self.save_every_epochs == 0:

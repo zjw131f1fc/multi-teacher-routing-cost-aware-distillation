@@ -42,7 +42,7 @@ trainer_settings:
   name: "basic-pytorch"
   dl_settings:
     batch_size: 16              # 批次大小
-    epochs: 40                  # 训练轮数
+    epochs: 80                  # 训练轮数
     print_loss_every_batches: 10  # 每10个batch打印loss
     eval_every_batches: 50      # 0表示不按batch评估
     save_every_batches: 0      # 0表示不按batch保存
@@ -54,7 +54,7 @@ trainer_settings:
     optimizers:
       router:
         type: "adam"
-        lr: 5.0e-6  # FP32 训练可以用更高的学习率
+        lr: 5.0e-5  # FP32 训练可以用更高的学习率
         weight_decay: 0.01
 
 method_settings:
@@ -67,9 +67,10 @@ method_settings:
     - "qwen2.5-math-7b-instruct"
 
   # 模型参数
-  dropout: 0.3               # Dropout rate
+  dropout: 0               # Dropout rate
   max_seq_length: 512        # 最大序列长度
-  pooling_strategy: "mean"   # Pooling策略: "mean"(平均池化) 或 "last"(最后token)
+  pooling_strategy: "last"   # Pooling策略: "mean"(平均池化) 或 "last"(最后token)
+                             # 推荐: 分数差模式使用"last"，因为prompt末尾是"Score difference:"
 
   # 桶化分类配置
   use_bucketing: false        # 是否使用桶化分类（false则使用回归）
@@ -93,7 +94,7 @@ method_settings:
   # 自适应分桶配置（当 adaptive_bucketing=true 时使用）
 
   # 固定桶配置（当 adaptive_bucketing=false 时使用，所有教师共享）
-  bucket_ranges: [2.0, 4.0, 6.0, 8.0]  # 固定桶边界（向后兼容）
+  bucket_ranges: [0.2, 0.4, 0.6, 0.8]  # 固定桶边界（向后兼容），对应 [0, 1] 范围
 
   # Focal Loss 配置（防止输出趋同）
   focal_gamma: 3.0           # 聚焦参数，越大对易分类样本惩罚越强（0=普通CE，2.0=推荐值，3.0=更强）

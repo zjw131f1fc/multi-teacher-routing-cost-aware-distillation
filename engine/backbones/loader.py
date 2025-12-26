@@ -9,6 +9,7 @@
 当前支持类型:
     - 'mllm': 多模态大语言模型
     - 'llm': 大语言模型
+    - 'encoder': 编码器模型
 
 扩展一个新 Backbone 步骤:
     1. 在 `backbones/base/` 下创建基类文件 (例如 base/mllm.py) 定义该类型的基类。
@@ -32,6 +33,9 @@ from .impl.mllm.llava_next import LLaVANextMLLMBackbone
 # LLM 类型
 from .impl.llm.qwen import QwenLLMBackbone
 
+# Encoder 类型
+from .impl.encoder.deberta import DeBERTaEncoderBackbone
+
 # 注册表结构: {type: {name: Class}}
 BACKBONE_REGISTRY: Dict[str, Dict[str, Type[Any]]] = {
     "mllm": {
@@ -42,6 +46,9 @@ BACKBONE_REGISTRY: Dict[str, Dict[str, Type[Any]]] = {
     "llm": {
         "qwen2.5-0.5b-instruct": QwenLLMBackbone,
         "qwen2.5-1.5b-instruct": QwenLLMBackbone,
+    },
+    "encoder": {
+        "deberta-v3-base": DeBERTaEncoderBackbone,
     },
 }
 

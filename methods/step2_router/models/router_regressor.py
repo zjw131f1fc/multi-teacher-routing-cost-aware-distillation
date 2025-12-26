@@ -10,9 +10,9 @@
         ↓
     MLP Head: hidden_dim → hidden_dim//4 → num_teachers
         ↓
-    Sigmoid + Scale (约束到0-10范围)
+    Sigmoid + Scale (约束到0-1范围)
         ↓
-    输出: [score_teacher1, score_teacher2, ...] (每个教师的 NTE 分数, 0-10)
+    输出: [score_teacher1, score_teacher2, ...] (每个教师的 NTE 分数, 0-1)
 
 2. 分类模式 (use_bucketing=True, use_score_diff=False):
     输入: instruction (问题文本，带prompt)
@@ -37,16 +37,24 @@
         ↓
     Pooling
         ↓
-    两个独立的MLP Head:
-        - Strong Teacher Head: hidden_dim → hidden_dim//4 → 1 (预测强教师的绝对分数)
-        - Diff Head: hidden_dim → hidden_dim//4 → 1 (预测弱教师与强教师的分数差)
+    单个MLP Head (Diff Head):
+        hidden_dim → hidden_dim//4 → 1 (预测两个教师的分数差)
         ↓
-    输出: [score_strong, score_strong - diff] (重构两个教师的分数)
+    Tanh (约束到 [-1, 1])
+        ↓
+    基于差值重构两个分数:
+        - 中心分数: center = 0.5
+        - 配置的"强教师": score = center + diff/2  (范围 [0, 1])
+        - 配置的"弱教师": score = center - diff/2  (范围 [0, 1])
+        ↓
+    输出: [score_teacher0, score_teacher1] (根据strong_teacher_idx重构)
 
 优势：
-- 降低任务难度：1个绝对分数 + 1个相对差值
-- 适合双教师场景（一强一弱）
-- 自动保证强教师分数 ≥ 弱教师分数
+- 极简任务：只需预测一个差值
+- diff > 0: 配置的强教师确实更强
+- diff < 0: 配置的弱教师实际更强
+- tanh输出 [-1, 1]，完美匹配分数差的真实范围
+- 重构的分数自然落在 [0, 1] 范围内，无需clip
 """
 
 import torch
@@ -63,7 +71,7 @@ class RouterRegressor(nn.Module):
         num_teachers: 教师数量
         hidden_dim: LLM hidden dimension
         dropout: Dropout rate (default=0.1)
-        score_scale: 分数缩放因子 (default=10.0, 仅用于回归模式)
+        score_scale: 分数缩放因子 (default=1.0, 仅用于回归模式)
         use_bucketing: 是否使用桶化分类 (default=False)
         num_buckets: 桶的数量 (仅用于分类模式, default=5)
         teacher_bucket_ranges: 教师特定桶边界字典 {teacher_name: [ranges]} (仅用于分类模式)
@@ -78,7 +86,7 @@ class RouterRegressor(nn.Module):
         num_teachers: int,
         hidden_dim: int,
         dropout: float = 0.1,
-        score_scale: float = 10.0,
+        score_scale: float = 1.0,
         use_bucketing: bool = False,
         num_buckets: int = 5,
         teacher_bucket_ranges: Optional[Dict[str, List[float]]] = None,
@@ -117,7 +125,7 @@ class RouterRegressor(nn.Module):
         intermediate_dim = hidden_dim // 4  # 1536 -> 384
 
         if use_score_diff:
-            # 分数差预测模式: 预测强教师分数 + 弱教师与强教师的差值
+            # 分数差预测模式: 只预测两个教师的分数差（可正可负）
             # 注意: 此模式与 use_bucketing 互斥，且仅支持 2 个教师
             if use_bucketing:
                 raise ValueError("use_score_diff 和 use_bucketing 不能同时为 True")
@@ -125,24 +133,18 @@ class RouterRegressor(nn.Module):
             if num_teachers != 2:
                 raise ValueError(f"分数差预测模式仅支持 2 个教师，当前教师数量: {num_teachers}")
 
-            # Head 1: 预测强教师的分数
-            self.strong_head = nn.Sequential(
-                nn.Linear(hidden_dim, intermediate_dim),
-                nn.GELU(),
-                nn.Dropout(dropout),
-                nn.Linear(intermediate_dim, 1)
-            )
-
-            # Head 2: 预测弱教师与强教师的分数差（差值应为非正数）
+            # 只有一个head: 预测配置的强教师与弱教师的分数差
+            # diff > 0: 强教师确实更强
+            # diff < 0: 弱教师实际更强
+            # 不加sigmoid，输出可以是任意实数
             self.diff_head = nn.Sequential(
                 nn.Linear(hidden_dim, intermediate_dim),
                 nn.GELU(),
                 nn.Dropout(dropout),
-                nn.Linear(intermediate_dim, 1)
+                nn.Linear(intermediate_dim, 1)  # 输出实数，不加sigmoid
             )
 
-            # 将两个head转换为与LLM相同的dtype和设备
-            self.strong_head = self.strong_head.to(dtype=llm_dtype, device=last_device)
+            # 将head转换为与LLM相同的dtype和设备
             self.diff_head = self.diff_head.to(dtype=llm_dtype, device=last_device)
 
         elif use_bucketing:
@@ -270,9 +272,9 @@ class RouterRegressor(nn.Module):
             attention_mask: [batch_size, seq_len]
 
         返回:
-            回归模式: scores [batch_size, num_teachers] - 预测的NTE分数 (0-10)
+            回归模式: scores [batch_size, num_teachers] - 预测的NTE分数 (0-1)
             分类模式: logits [batch_size, num_teachers, num_buckets] - 每个教师的桶 logits
-            分数差模式: scores [batch_size, num_teachers] - 预测的NTE分数 (0-10)
+            分数差模式: scores [batch_size, num_teachers] - 预测的NTE分数 (0-1)
         """
         # 获取 LLM 第一层的设备（embedding 层所在设备）
         llm_device = next(self.llm.parameters()).device
@@ -308,26 +310,24 @@ class RouterRegressor(nn.Module):
         pooled = self.layer_norm(pooled)
 
         if self.use_score_diff:
-            # 分数差预测模式：预测强教师分数 + 差值（仅支持2个教师）
-            # 1. 预测强教师的分数
-            strong_logit = self.strong_head(pooled)  # [batch, 1]
-            strong_score = torch.sigmoid(strong_logit) * self.score_scale  # [batch, 1], 范围 [0, 10]
+            # 分数差预测模式：只预测差值（仅支持2个教师）
+            # 1. 预测分数差，使用tanh约束到 [-1, 1]
+            diff_logit = self.diff_head(pooled).squeeze(-1)  # [batch]
+            diff = torch.tanh(diff_logit)  # [batch], 范围 [-1, 1]
 
-            # 2. 预测弱教师与强教师的分数差（使用 sigmoid 约束到 [0, score_scale]，然后取负）
-            diff_logit = self.diff_head(pooled)  # [batch, 1]
-            # 差值应该是非正数（弱教师总是不如或等于强教师）
-            diff = -(torch.sigmoid(diff_logit) * self.score_scale)  # [batch, 1], 范围 [-10, 0]
+            # 2. 基于差值重构两个分数
+            # 使用中心分数0.5，根据差值对称分配
+            center = self.score_scale / 2.0  # 0.5
+            strong_score = center + diff / 2.0  # 配置的强教师分数，范围 [0, 1]
+            weak_score = center - diff / 2.0   # 配置的弱教师分数，范围 [0, 1]
 
-            # 3. 重构弱教师的分数
-            weak_score = strong_score + diff  # [batch, 1]
-
-            # 4. 根据 strong_teacher_idx 拼接（0=强教师在前，1=弱教师在前）
+            # 3. 根据 strong_teacher_idx 拼接（0=强教师在前，1=弱教师在前）
             if self.strong_teacher_idx == 0:
                 # 强教师在第0位，弱教师在第1位
-                scores = torch.cat([strong_score, weak_score], dim=-1)  # [batch, 2]
+                scores = torch.stack([strong_score, weak_score], dim=-1)  # [batch, 2]
             else:
                 # 弱教师在第0位，强教师在第1位
-                scores = torch.cat([weak_score, strong_score], dim=-1)  # [batch, 2]
+                scores = torch.stack([weak_score, strong_score], dim=-1)  # [batch, 2]
 
             return scores
 

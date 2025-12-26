@@ -38,13 +38,15 @@ method_settings:
     - "qwen2.5-math-7b-instruct"
 
   # NTE Score 参数
-  nte_alpha: 3.0  # Beta 分布参数 α (增大以提高对高likelihood的偏好)
-  nte_beta: 1.0   # Beta 分布参数 β (增大以增加区分度)
+  nte_alpha: 3.0  # Beta 分布参数 α (Proximity计算：控制对高likelihood的偏好)
+  nte_beta: 1.0   # Beta 分布参数 β (Proximity计算：控制区分度)
 
-  # NTE 指数平滑参数: V_soft = ε + (1-ε)×V, NTE = V_soft^α × M_prox^β
-  nte_quality_power: 0.6     # 质量分数的指数 α (降低质量权重)
-  nte_proximity_power: 0.4   # 可学习性分数的指数 β (提高可学习性权重，主导作用)
-  nte_quality_floor: 0.1     # 质量分数下限 ε (降低到0.1，增加分数范围)
+  # NTE 线性组合权重（简化版）: NTE = (quality × w_q + proximity × w_p) × 10
+  nte_quality_weight: 0.6     # 质量分数的权重 w_q (default=0.7, 主要看质量)
+  nte_proximity_weight: 0.4   # 可学习性分数的权重 w_p (default=0.3, 辅助区分)
+  # 注意: quality_weight + proximity_weight 应该 = 1.0
+  # 如果只关心质量: w_q=1.0, w_p=0.0
+  # 如果只关心可学习性: w_q=0.0, w_p=1.0
 
   # 质量分数的 reward key
   reward_key: "math_verify"  # 从 rewards 中提取哪个 key 作为质量分数

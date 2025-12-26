@@ -3,14 +3,23 @@
 计算学生模型对每个 teacher response 的似然概率，并计算 NTE 分数。
 保存到 method_cache/student_scores.json
 
-NTE Score 公式:
-    NTE(x,y) = V(y) * M_prox(p)
+NTE Score 公式（简化版 - 线性组合）:
+    NTE(x,y) = V(y) × w_q + M_prox(p) × w_p
 
     其中:
-    - V(y): 教师响应的质量分数（来自 rewards）
-    - M_prox(p): 近端可学习性，基于学生模型的似然概率 p
+    - V(y): 教师响应的质量分数（来自 rewards）[0, 1]
+    - M_prox(p): 近端可学习性，基于学生模型的似然概率 p [0, 1]
         M_prox = (p^α * (1-p)^β) / Z
         建议参数: α=2.0, β=0.5
+    - w_q: 质量权重（default=0.7，更重视质量）
+    - w_p: 可学习性权重（default=0.3）
+    - NTE 输出范围: [0, 1]
+
+优势:
+    - 线性组合比指数组合更容易被神经网络拟合
+    - 保留质量和可学习性两个维度的信息
+    - 权重可调，适应不同场景
+    - 输出 [0, 1]，可以直接用 sigmoid 约束
 """
 
 import os
@@ -64,61 +73,51 @@ def compute_proximity_score(p: float, alpha: float = 2.0, beta: float = 0.5, Z: 
 def compute_nte_score(
     quality: float,
     proximity: float,
-    quality_power: float = 0.3,
-    proximity_power: float = 0.7,
-    quality_floor: float = 0.1
+    quality_weight: float = 0.7,
+    proximity_weight: float = 0.3
 ) -> float:
     """计算 NTE (Normalized Teaching Efficacy) 分数
 
-    使用 Soft Quality + 指数平滑组合:
-        V_soft(y) = ε + (1-ε) × V(y)  (将 [0,1] 映射到 [ε, 1])
-        NTE = V_soft(y)^α × M_prox(p)^β
+    使用线性组合（简化版）:
+        NTE = quality × w_q + proximity × w_p
 
-    这样即使 quality=0，仍能通过 proximity 区分不同的响应。
+    这个简化版本更容易被神经网络拟合，同时保留了质量和可学习性两个维度的信息。
+    输出范围为 [0, 1]，可以直接用 sigmoid 约束。
 
     参数:
         quality: 教师响应的质量分数 V(y) [0, 1]（通常为离散的 0 或 1）
         proximity: 近端可学习性分数 M_prox [0, 1]
-        quality_power: 质量分数的指数 α (default=0.3, 推荐值)
-        proximity_power: 可学习性分数的指数 β (default=0.7, 推荐值)
-        quality_floor: 质量分数的下限 ε (default=0.1)
+        quality_weight: 质量分数的权重 w_q (default=0.7, 更重视质量)
+        proximity_weight: 可学习性分数的权重 w_p (default=0.3)
 
     返回:
-        NTE: [0, 10] 之间的分数
+        NTE: [0, 1] 之间的分数
 
     说明:
-        - α<β (推荐 α=0.3, β=0.7): 更重视可学习性，适合离散质量分数
-        - α=β=0.5: 两者平衡，类似几何平均
-        - α>β: 更重视质量
-        - quality_floor: 控制低质量响应的权重
-          - ε=0.1: 低质量响应仍保留 10% 的权重（推荐）
-          - ε=0.0: 退化为原始方案，quality=0 时 NTE=0
-          - ε=0.5: 高低质量响应权重差异较小
+        - quality_weight + proximity_weight = 1.0 (归一化)
+        - 推荐 w_q=0.7, w_p=0.3: 主要看质量，辅助考虑可学习性
+        - 如果只关心质量: w_q=1.0, w_p=0.0
+        - 如果只关心可学习性: w_q=0.0, w_p=1.0
 
-    示例 (α=0.3, β=0.7, ε=0.1):
-        - Quality=0, Proximity=0.9: V_soft=0.1, NTE = 0.1^0.3 × 0.9^0.7 × 10 ≈ 4.78
-        - Quality=0, Proximity=0.5: V_soft=0.1, NTE = 0.1^0.3 × 0.5^0.7 × 10 ≈ 3.14
-        - Quality=0, Proximity=0.1: V_soft=0.1, NTE = 0.1^0.3 × 0.1^0.7 × 10 ≈ 1.58
-        - Quality=1, Proximity=0.9: V_soft=1.0, NTE = 1.0^0.3 × 0.9^0.7 × 10 ≈ 9.33
-        - Quality=1, Proximity=0.1: V_soft=1.0, NTE = 1.0^0.3 × 0.1^0.7 × 10 ≈ 2.00
-        → 即使 quality=0，proximity 的差异仍能显著体现 (4.78 vs 1.58)
-        → proximity 主导: 低质量+高可学习性 (4.78) > 高质量+低可学习性 (2.00)
+    示例 (w_q=0.7, w_p=0.3):
+        - Quality=0, Proximity=0.9: NTE = 0×0.7 + 0.9×0.3 = 0.27
+        - Quality=0, Proximity=0.5: NTE = 0×0.7 + 0.5×0.3 = 0.15
+        - Quality=0, Proximity=0.1: NTE = 0×0.7 + 0.1×0.3 = 0.03
+        - Quality=1, Proximity=0.9: NTE = 1×0.7 + 0.9×0.3 = 0.97
+        - Quality=1, Proximity=0.5: NTE = 1×0.7 + 0.5×0.3 = 0.85
+        - Quality=1, Proximity=0.1: NTE = 1×0.7 + 0.1×0.3 = 0.73
+        → 质量主导，proximity提供额外区分度
+        → 高质量+低可学习性 (0.73) > 低质量+高可学习性 (0.27)
     """
     # 防止数值问题
     quality = np.clip(quality, 0.0, 1.0)
     proximity = np.clip(proximity, 0.0, 1.0)
 
-    # Soft Quality: 将 [0, 1] 映射到 [quality_floor, 1]
-    quality_soft = quality_floor + (1.0 - quality_floor) * quality
+    # 线性组合（简化版本）
+    nte = quality * quality_weight + proximity * proximity_weight
 
-    # 指数平滑组合
-    nte = (quality_soft ** quality_power) * (proximity ** proximity_power)
-
-    # 缩放到 [0, 10] 范围
-    nte_scaled = nte * 10.0
-
-    # 最终保证在 [0, 10]
-    return float(np.clip(nte_scaled, 0.0, 10.0))
+    # 最终保证在 [0, 1]
+    return float(np.clip(nte, 0.0, 1.0))
 
 
 # ==================== 文本预处理 ====================
@@ -260,9 +259,8 @@ def collect_student_scores(config_path: str = "configs/step1_collect_scores.yaml
 
     alpha = method_cfg.get("nte_alpha", 2.0)
     beta = method_cfg.get("nte_beta", 0.5)
-    quality_power = method_cfg.get("nte_quality_power", 0.3)
-    proximity_power = method_cfg.get("nte_proximity_power", 0.7)
-    quality_floor = method_cfg.get("nte_quality_floor", 0.1)
+    quality_weight = method_cfg.get("nte_quality_weight", 0.7)
+    proximity_weight = method_cfg.get("nte_proximity_weight", 0.3)
     max_samples = method_cfg.get("max_samples", None)
     reward_key = method_cfg.get("reward_key", "math_verify")
     study_name = method_cfg.get("study_name", "step1_collect_scores")
@@ -331,8 +329,9 @@ def collect_student_scores(config_path: str = "configs/step1_collect_scores.yaml
     # 计算归一化常数
     Z = compute_beta_normalization(alpha, beta)
     logger.info(f"Beta 归一化常数 Z = {Z:.6f} (α={alpha}, β={beta})")
-    logger.info(f"NTE 指数参数: quality_power={quality_power}, proximity_power={proximity_power}")
-    logger.info(f"NTE Quality Floor: {quality_floor} (低质量响应保留 {quality_floor*100:.0f}% 权重)")
+    logger.info(f"NTE 线性权重: quality_weight={quality_weight}, proximity_weight={proximity_weight}")
+    logger.info(f"NTE 公式: NTE = quality × {quality_weight} + proximity × {proximity_weight}")
+    logger.info(f"NTE 输出范围: [0, 1]")
     logger.info("预处理: 去除 CoT 标签 (<think>, <cot>, <reasoning> 等)")
 
     # 收集所有样本的分数
@@ -400,7 +399,7 @@ def collect_student_scores(config_path: str = "configs/step1_collect_scores.yaml
 
             # 4. 计算 NTE 分数
             nte_score = compute_nte_score(
-                quality, proximity, quality_power, proximity_power, quality_floor
+                quality, proximity, quality_weight, proximity_weight
             )
 
             # 保存结果

@@ -6,9 +6,37 @@ from typing import Dict, Any, List
 import numpy as np
 
 
-def _build_prompt(instruction: str) -> str:
-    """构建路由器的输入prompt"""
-    return f"""Analyze the following problem and determine which AI model would be most suitable to answer it.
+def _build_prompt(instruction: str, mode: str = "routing", strong_teacher: str = None, weak_teacher: str = None) -> str:
+    """构建路由器的输入prompt
+
+    参数:
+        instruction: 问题文本
+        mode: "routing" (路由模式) 或 "score_diff" (分数差预测模式)
+        strong_teacher: 强教师名称（仅score_diff模式需要）
+        weak_teacher: 弱教师名称（仅score_diff模式需要）
+
+    返回:
+        prompt: 构建好的prompt
+    """
+    if mode == "score_diff":
+        # 分数差预测模式：清晰描述任务
+        return f"""You are evaluating which AI model performs better on a given problem.
+
+Task: Predict how much better {strong_teacher} performs compared to {weak_teacher} on the following problem.
+
+Instructions:
+- Output a single number representing the score difference
+- Positive number: {strong_teacher} is better (e.g., +3.5 means {strong_teacher} scores 3.5 points higher)
+- Negative number: {weak_teacher} is better (e.g., -2.0 means {weak_teacher} scores 2.0 points higher)
+- Zero: Both models perform equally well
+
+Problem:
+{instruction}
+
+Score difference:"""
+    else:
+        # 原始路由模式
+        return f"""Analyze the following problem and determine which AI model would be most suitable to answer it.
 
 Problem:
 {instruction}
@@ -20,19 +48,19 @@ def score_to_bucket(score: float, bucket_ranges: List[float]) -> int:
     """将连续分数转换为桶索引
 
     参数:
-        score: NTE 分数 (0-10)
-        bucket_ranges: 桶边界，例如 [2.0, 4.0, 6.0, 8.0]
+        score: NTE 分数 (0-1)
+        bucket_ranges: 桶边界，例如 [0.2, 0.4, 0.6, 0.8]
 
     返回:
         bucket_idx: 桶索引 (0 到 num_buckets-1)
 
     示例:
-        bucket_ranges = [2.0, 4.0, 6.0, 8.0]
-        score=1.5  -> bucket_0: [0.0, 2.0)
-        score=3.2  -> bucket_1: [2.0, 4.0)
-        score=5.8  -> bucket_2: [4.0, 6.0)
-        score=7.1  -> bucket_3: [6.0, 8.0)
-        score=9.5  -> bucket_4: [8.0, 10.0]
+        bucket_ranges = [0.2, 0.4, 0.6, 0.8]
+        score=0.15 -> bucket_0: [0.0, 0.2)
+        score=0.32 -> bucket_1: [0.2, 0.4)
+        score=0.58 -> bucket_2: [0.4, 0.6)
+        score=0.71 -> bucket_3: [0.6, 0.8)
+        score=0.95 -> bucket_4: [0.8, 1.0]
     """
     for i, threshold in enumerate(bucket_ranges):
         if score < threshold:
@@ -150,8 +178,12 @@ def pairwise_ranking_loss(
         return total_loss
 
 
-def _process_batch(batch, tokenizer, required_teachers, max_seq_length, device, use_bucketing=False, teacher_bucket_ranges=None):
+def _process_batch(batch, tokenizer, required_teachers, max_seq_length, device, use_bucketing=False, teacher_bucket_ranges=None, use_score_diff=False, strong_teacher_idx=0):
     """处理batch数据：tokenization + 提取target scores/buckets
+
+    参数:
+        use_score_diff: 是否使用分数差模式
+        strong_teacher_idx: 强教师索引（仅score_diff模式需要）
 
     返回:
         如果 use_bucketing=False (回归模式):
@@ -170,8 +202,19 @@ def _process_batch(batch, tokenizer, required_teachers, max_seq_length, device, 
                 "masks": [batch_size, num_teachers]
             }
     """
-    # 为每个instruction添加prompt
-    prompts = [_build_prompt(sample["instruction"]) for sample in batch]
+    # 根据模式选择prompt
+    if use_score_diff:
+        # 分数差模式：使用特殊的prompt
+        strong_teacher = required_teachers[strong_teacher_idx]
+        weak_teacher = required_teachers[1 - strong_teacher_idx]
+        prompts = [
+            _build_prompt(sample["instruction"], mode="score_diff",
+                         strong_teacher=strong_teacher, weak_teacher=weak_teacher)
+            for sample in batch
+        ]
+    else:
+        # 回归/分类模式：使用原始prompt
+        prompts = [_build_prompt(sample["instruction"]) for sample in batch]
 
     # Tokenize
     encodings = tokenizer(
@@ -234,6 +277,7 @@ def _process_batch(batch, tokenizer, required_teachers, max_seq_length, device, 
 
     if use_bucketing:
         result["target_buckets"] = torch.tensor(target_buckets, dtype=torch.long, device=device)
+        result["target_scores"] = torch.tensor(target_scores, dtype=torch.float32, device=device)  # 桶化模式也返回分数（用于计算Top-1准确率）
     else:
         result["target_scores"] = torch.tensor(target_scores, dtype=torch.float32, device=device)
 
@@ -281,12 +325,15 @@ def train_step(batch: Dict[str, Any], device: str, info: Dict[str, Any]) -> Dict
     use_bucketing = config["method_settings"].get("use_bucketing", False)
     use_score_diff = config["method_settings"].get("use_score_diff", False)
     teacher_bucket_ranges = config["method_settings"].get("teacher_bucket_ranges", None)
+    strong_teacher_idx = config["method_settings"].get("strong_teacher_idx", 0)
 
     # 处理batch：tokenization + 提取target
     processed = _process_batch(
         batch, tokenizer, required_teachers, max_seq_length, device,
         use_bucketing=use_bucketing,
-        teacher_bucket_ranges=teacher_bucket_ranges
+        teacher_bucket_ranges=teacher_bucket_ranges,
+        use_score_diff=use_score_diff,
+        strong_teacher_idx=strong_teacher_idx
     )
 
     input_ids = processed["input_ids"]
@@ -332,36 +379,115 @@ def train_step(batch: Dict[str, Any], device: str, info: Dict[str, Any]) -> Dict
 
         focal_total_loss = focal_total_loss / (valid_count + 1e-8)
 
-        # 返回损失字典
+        # 计算Top-1准确率（桶化模式）
+        with torch.no_grad():
+            # 将logits转换为期望分数
+            expected_scores = router.get_expected_scores(logits, teacher_names=required_teachers)  # [batch, num_teachers]
+
+            # 找到预测的最佳教师和真实的最佳教师
+            pred_best = torch.argmax(expected_scores, dim=1)  # [batch]
+            true_best = torch.argmax(target_scores, dim=1)  # [batch]
+
+            # 计算准确率（只考虑所有教师都有效的样本）
+            all_valid = masks.sum(dim=1) == num_teachers  # [batch]
+            if all_valid.sum() > 0:
+                top1_acc = (pred_best[all_valid] == true_best[all_valid]).float().mean().item()
+            else:
+                top1_acc = 0.0
+
+        # 返回损失字典和指标
         return {
             "router": {
                 "loss": focal_total_loss,
                 "focal_loss": focal_total_loss.item()
+            },
+            "metrics": {
+                "top1_acc": top1_acc
             }
         }
     else:
         # ============== 回归模式 / 分数差预测模式 ==============
-        # 分数差模式在forward中已经重构为完整分数，因此loss计算与回归模式相同
-        pred_scores = outputs  # [batch, num_teachers]
-        target_scores = processed["target_scores"]  # [batch, num_teachers]
+        use_score_diff = config["method_settings"].get("use_score_diff", False)
 
-        # 转换target为模型的dtype
-        target_scores = target_scores.to(dtype=model_dtype)
+        if use_score_diff:
+            # 分数差模式：直接监督 diff，而不是重构后的分数
+            pred_scores = outputs  # [batch, 2]，已经是重构后的分数
+            target_scores = processed["target_scores"]  # [batch, 2]
 
-        # 将预测结果移到target所在的设备
-        pred_scores = pred_scores.to(target_scores.device)
+            # 转换target为模型的dtype
+            target_scores = target_scores.to(dtype=model_dtype)
+            pred_scores = pred_scores.to(target_scores.device)
 
-        # 计算损失 (只对有效的教师计算)
-        mse_loss = F.mse_loss(pred_scores, target_scores, reduction='none')  # [batch, num_teachers]
-        mse_loss = (mse_loss * masks).sum() / (masks.sum() + 1e-8)  # 平均到有效的教师上
+            # 获取 strong_teacher_idx
+            strong_teacher_idx = config["method_settings"].get("strong_teacher_idx", 0)
 
-        # 返回损失字典
-        return {
-            "router": {
-                "loss": mse_loss,
-                "mse_loss": mse_loss.item()
+            # 计算真实的 diff 和预测的 diff
+            true_diff = target_scores[:, strong_teacher_idx] - target_scores[:, 1 - strong_teacher_idx]  # [batch]
+            pred_diff = pred_scores[:, strong_teacher_idx] - pred_scores[:, 1 - strong_teacher_idx]  # [batch]
+
+            # 直接监督 diff（MSE Loss）
+            diff_loss = F.mse_loss(pred_diff, true_diff)
+
+            # 计算Top-1准确率
+            with torch.no_grad():
+                pred_best = torch.argmax(pred_scores, dim=1)  # [batch]
+                true_best = torch.argmax(target_scores, dim=1)  # [batch]
+
+                num_teachers = masks.shape[1]
+                all_valid = masks.sum(dim=1) == num_teachers  # [batch]
+                if all_valid.sum() > 0:
+                    top1_acc = (pred_best[all_valid] == true_best[all_valid]).float().mean().item()
+                else:
+                    top1_acc = 0.0
+
+            return {
+                "router": {
+                    "loss": diff_loss,
+                    "diff_loss": diff_loss.item()
+                },
+                "metrics": {
+                    "top1_acc": top1_acc
+                }
             }
-        }
+        else:
+            # 回归模式：监督完整分数
+            pred_scores = outputs  # [batch, num_teachers]
+            target_scores = processed["target_scores"]  # [batch, num_teachers]
+
+            # 转换target为模型的dtype
+            target_scores = target_scores.to(dtype=model_dtype)
+
+            # 将预测结果移到target所在的设备
+            pred_scores = pred_scores.to(target_scores.device)
+
+            # 计算损失 (只对有效的教师计算)
+            mse_loss = F.mse_loss(pred_scores, target_scores, reduction='none')  # [batch, num_teachers]
+            mse_loss = (mse_loss * masks).sum() / (masks.sum() + 1e-8)  # 平均到有效的教师上
+
+            # 计算Top-1准确率
+            with torch.no_grad():
+                # 找到预测的最佳教师和真实的最佳教师
+                pred_best = torch.argmax(pred_scores, dim=1)  # [batch]
+                true_best = torch.argmax(target_scores, dim=1)  # [batch]
+
+                # 计算准确率（只考虑所有教师都有效的样本）
+                num_teachers = masks.shape[1]
+                all_valid = masks.sum(dim=1) == num_teachers  # [batch]
+                if all_valid.sum() > 0:
+                    top1_acc = (pred_best[all_valid] == true_best[all_valid]).float().mean().item()
+                else:
+                    top1_acc = 0.0
+
+            # 返回损失字典和指标
+            return {
+                "router": {
+                    "loss": mse_loss,
+                    "mse_loss": mse_loss.item()
+                },
+                "metrics": {
+                    "top1_acc": top1_acc
+                }
+            }
 
 
 def eval_step(batch: Dict[str, Any], device: str, info: Dict[str, Any]) -> Dict[str, Any]:
@@ -379,6 +505,13 @@ def eval_step(batch: Dict[str, Any], device: str, info: Dict[str, Any]) -> Dict[
                 "mae": MAE,
                 "top1_acc": Top-1准确率,
                 "pearson": Pearson相关系数,
+            }
+
+        分数差模式:
+            metrics: {
+                "top1_acc": Top-1准确率（最重要）,
+                "diff_mae": 差值的MAE,
+                "diff_mse": 差值的MSE,
             }
 
         分类模式:
@@ -399,12 +532,15 @@ def eval_step(batch: Dict[str, Any], device: str, info: Dict[str, Any]) -> Dict[
     use_bucketing = config["method_settings"].get("use_bucketing", False)
     use_score_diff = config["method_settings"].get("use_score_diff", False)
     teacher_bucket_ranges = config["method_settings"].get("teacher_bucket_ranges", None)
+    strong_teacher_idx = config["method_settings"].get("strong_teacher_idx", 0)
 
     # 处理batch：tokenization + 提取target
     processed = _process_batch(
         batch, tokenizer, required_teachers, max_seq_length, device,
         use_bucketing=use_bucketing,
-        teacher_bucket_ranges=teacher_bucket_ranges
+        teacher_bucket_ranges=teacher_bucket_ranges,
+        use_score_diff=use_score_diff,
+        strong_teacher_idx=strong_teacher_idx
     )
 
     input_ids = processed["input_ids"]
@@ -522,45 +658,68 @@ def eval_step(batch: Dict[str, Any], device: str, info: Dict[str, Any]) -> Dict[
         # 将预测结果移到target所在的设备
         pred_scores = pred_scores.to(target_scores.device)
 
-        # 计算整体 MSE 和 MAE
-        mse_loss = F.mse_loss(pred_scores, target_scores, reduction='none')  # [batch, num_teachers]
-        mse = (mse_loss * masks).sum() / (masks.sum() + 1e-8)
-
-        mae = torch.abs(pred_scores - target_scores)
-        mae = (mae * masks).sum() / (masks.sum() + 1e-8)
-
         # 计算更实际的指标：Top-1 准确率
         # 对于每个样本，比较预测的最佳教师和真实的最佳教师是否一致
         pred_best_teacher = pred_scores.argmax(dim=1)  # [batch]
         true_best_teacher = target_scores.argmax(dim=1)  # [batch]
         top1_correct = (pred_best_teacher == true_best_teacher).float().mean()
 
-        # 计算 Pearson 相关系数（整体）
-        # 将所有有效的 pred 和 target 展平
-        valid_mask = masks.view(-1) > 0
-        pred_flat = pred_scores.view(-1)[valid_mask]
-        target_flat = target_scores.view(-1)[valid_mask]
+        if use_score_diff:
+            # ============== 分数差模式：只关注diff相关指标 ==============
+            # 获取strong_teacher_idx
+            strong_teacher_idx = config["method_settings"].get("strong_teacher_idx", 0)
+            weak_teacher_idx = 1 - strong_teacher_idx
 
-        if len(pred_flat) > 1:
-            # Pearson correlation
-            pred_mean = pred_flat.mean()
-            target_mean = target_flat.mean()
-            pred_centered = pred_flat - pred_mean
-            target_centered = target_flat - target_mean
+            # 计算真实的diff和预测的diff
+            true_diff = target_scores[:, strong_teacher_idx] - target_scores[:, weak_teacher_idx]  # [batch]
+            pred_diff = pred_scores[:, strong_teacher_idx] - pred_scores[:, weak_teacher_idx]  # [batch]
 
-            numerator = (pred_centered * target_centered).sum()
-            denominator = torch.sqrt((pred_centered ** 2).sum() * (target_centered ** 2).sum())
+            # 计算diff的MAE
+            diff_mae = torch.abs(pred_diff - true_diff).mean()
 
-            if denominator > 1e-8:
-                pearson = numerator / denominator
+            # 计算diff的MSE
+            diff_mse = F.mse_loss(pred_diff, true_diff)
+
+            return {
+                "top1_acc": top1_correct.item(),  # Top-1 准确率：最重要的指标
+                "diff_mae": diff_mae.item(),       # 差值的MAE
+                "diff_mse": diff_mse.item(),       # 差值的MSE
+            }
+        else:
+            # ============== 回归模式：返回完整的指标 ==============
+            # 计算整体 MSE 和 MAE
+            mse_loss = F.mse_loss(pred_scores, target_scores, reduction='none')  # [batch, num_teachers]
+            mse = (mse_loss * masks).sum() / (masks.sum() + 1e-8)
+
+            mae = torch.abs(pred_scores - target_scores)
+            mae = (mae * masks).sum() / (masks.sum() + 1e-8)
+
+            # 计算 Pearson 相关系数（整体）
+            # 将所有有效的 pred 和 target 展平
+            valid_mask = masks.view(-1) > 0
+            pred_flat = pred_scores.view(-1)[valid_mask]
+            target_flat = target_scores.view(-1)[valid_mask]
+
+            if len(pred_flat) > 1:
+                # Pearson correlation
+                pred_mean = pred_flat.mean()
+                target_mean = target_flat.mean()
+                pred_centered = pred_flat - pred_mean
+                target_centered = target_flat - target_mean
+
+                numerator = (pred_centered * target_centered).sum()
+                denominator = torch.sqrt((pred_centered ** 2).sum() * (target_centered ** 2).sum())
+
+                if denominator > 1e-8:
+                    pearson = numerator / denominator
+                else:
+                    pearson = torch.tensor(0.0, device=device)
             else:
                 pearson = torch.tensor(0.0, device=device)
-        else:
-            pearson = torch.tensor(0.0, device=device)
 
-        return {
-            "mse": mse.item(),
-            "mae": mae.item(),
-            "top1_acc": top1_correct.item(),  # Top-1 准确率：最重要的指标
-            "pearson": pearson.item(),  # 相关系数：越接近 1 越好
-        }
+            return {
+                "mse": mse.item(),
+                "mae": mae.item(),
+                "top1_acc": top1_correct.item(),  # Top-1 准确率：最重要的指标
+                "pearson": pearson.item(),  # 相关系数：越接近 1 越好
+            }

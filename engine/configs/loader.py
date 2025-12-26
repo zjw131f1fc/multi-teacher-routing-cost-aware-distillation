@@ -153,6 +153,15 @@ DEFAULT_CONFIG = {
             "hidden_dim": 2048,
             "vision_dim": 2048,
             "image_max_size": 1500,
+        },
+        "llm_settings": {
+            "device_map": "auto",
+            "hidden_dim": 896,
+        },
+        "encoder_settings": {
+            "device_map": "auto",
+            "pooling_mode": "mean",
+            "hidden_dim": 768,
         }
     },
     "method_settings": {
@@ -205,6 +214,9 @@ BACKBONE_DIM_MAP = {
     "llava-1.5-7b": {"hidden_dim": 4096, "vision_dim": 1024},
     "qwen2.5-0.5b-instruct": {"hidden_dim": 896},  # LLM, no vision_dim
     "qwen2.5-1.5b-instruct": {"hidden_dim": 1536},  # LLM, no vision_dim
+    "deberta-v3-base": {"hidden_dim": 768},  # Encoder, no vision_dim
+    "deberta-v3-large": {"hidden_dim": 1024},  # Encoder, no vision_dim
+    "deberta-v3-small": {"hidden_dim": 768},  # Encoder, no vision_dim
 }
 
 
@@ -500,6 +512,8 @@ def load_config(override_dict: Optional[Dict[str, Any]] = None,
         config["backbone_settings"]["mllm_settings"]["vision_dim"] = dim_config["vision_dim"]
     elif backbone_type == "llm":
         config["backbone_settings"]["llm_settings"]["hidden_dim"] = dim_config["hidden_dim"]
+    elif backbone_type == "encoder":
+        config["backbone_settings"]["encoder_settings"]["hidden_dim"] = dim_config["hidden_dim"]
     
     # 6. 生成 experiment_tag 和路径（如果不跳过）
     if not skip_auto_paths:

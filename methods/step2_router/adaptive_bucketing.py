@@ -62,7 +62,7 @@ def compute_quantization_error(scores: np.ndarray, bucket_ranges: List[float]) -
     """
     # 计算桶中心
     centers = []
-    all_bounds = [0.0] + list(bucket_ranges) + [10.0]
+    all_bounds = [0.0] + list(bucket_ranges) + [1.0]
     for i in range(len(all_bounds) - 1):
         centers.append((all_bounds[i] + all_bounds[i + 1]) / 2)
 
@@ -93,11 +93,11 @@ def uniform_bucketing(num_buckets: int) -> Tuple[List[float], List[float]]:
     返回:
         (bucket_ranges, bucket_centers)
     """
-    step = 10.0 / num_buckets
+    step = 1.0 / num_buckets
     bucket_ranges = [step * (i + 1) for i in range(num_buckets - 1)]
 
     # 计算桶中心
-    all_bounds = [0.0] + bucket_ranges + [10.0]
+    all_bounds = [0.0] + bucket_ranges + [1.0]
     centers = [(all_bounds[i] + all_bounds[i + 1]) / 2 for i in range(len(all_bounds) - 1)]
 
     return bucket_ranges, centers
@@ -117,7 +117,7 @@ def quantile_bucketing(scores: np.ndarray, num_buckets: int) -> Tuple[List[float
     bucket_ranges = np.percentile(scores, percentiles).tolist()
 
     # 计算桶中心
-    all_bounds = [0.0] + bucket_ranges + [10.0]
+    all_bounds = [0.0] + bucket_ranges + [1.0]
     centers = [(all_bounds[i] + all_bounds[i + 1]) / 2 for i in range(len(all_bounds) - 1)]
 
     return bucket_ranges, centers
@@ -208,7 +208,7 @@ def adaptive_bucketing_per_teacher(
         errors = compute_quantization_error(scores, bucket_ranges)
 
         # 统计每个桶的样本分布
-        all_bounds = [0.0] + bucket_ranges + [10.0]
+        all_bounds = [0.0] + bucket_ranges + [1.0]
         bucket_distribution = []
         log(f"\n  桶配置:")
         log(f"    桶边界: {[round(x, 4) for x in bucket_ranges]}")
@@ -239,7 +239,7 @@ def adaptive_bucketing_per_teacher(
 
         # 计算综合得分（归一化处理）
         # 归一化MSE: 使用MSE/(分数范围^2)作为归一化误差，值越小越好
-        max_possible_mse = (10.0 / 2) ** 2  # 最大可能的MSE（所有分数都离中心最远）
+        max_possible_mse = (1.0 / 2) ** 2  # 最大可能的MSE（所有分数都离中心最远）
         normalized_error = errors['mse'] / max_possible_mse  # 0到1之间，越小越好
 
         # 综合得分 = (1-balance_weight) * (1-normalized_error) + balance_weight * uniformity_score
@@ -288,11 +288,11 @@ def compare_bucketing_methods(
     log("-" * 80)
 
     results = {}
-    max_possible_mse = (10.0 / 2) ** 2
+    max_possible_mse = (1.0 / 2) ** 2
 
     # 辅助函数：计算桶分布
     def get_bucket_distribution(scores, bucket_ranges):
-        all_bounds = [0.0] + bucket_ranges + [10.0]
+        all_bounds = [0.0] + bucket_ranges + [1.0]
         distribution = []
         for i in range(len(all_bounds) - 1):
             lower = all_bounds[i]
@@ -371,8 +371,8 @@ if __name__ == "__main__":
 
     # 模拟两个教师的NTE分数分布（分布差异很大）
     teacher_scores = {
-        "deepseek-r1": np.clip(np.random.beta(5, 2, 1000) * 10, 0, 10),  # 偏高分
-        "qwen2.5-math-7b-instruct": np.clip(np.random.beta(2, 5, 1000) * 10, 0, 10),  # 偏低分
+        "deepseek-r1": np.clip(np.random.beta(5, 2, 1000), 0, 1),  # 偏高分，[0, 1]范围
+        "qwen2.5-math-7b-instruct": np.clip(np.random.beta(2, 5, 1000), 0, 1),  # 偏低分，[0, 1]范围
     }
 
     print("=" * 80)

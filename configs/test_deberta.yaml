@@ -1,0 +1,35 @@
+# 测试 DeBERTa Encoder Backbone 配置
+
+global_settings:
+  seed: 42
+  device: "cpu"  # 使用 CPU 测试
+  dtype: "float32"
+  dataset_cache_dir: "/data/users/zjw/dataset_cache"
+  hf_cache_dir: "/data/users/zjw/huggingface_cache"
+
+config_settings:
+  enable_dict_overrides: true
+  enable_yaml_overrides: true
+  log_config_on_load: true
+
+backbone_settings:
+  type: "encoder"
+  name: "deberta-v3-base"
+  encoder_settings:
+    device_map: "cpu"
+    pooling_mode: "mean"
+
+dataset_settings:
+  type: "distill"
+  name: "distill-openr1-math"
+  distill_settings:
+    split:
+      train: 10
+      test: 5
+
+trainer_settings:
+  type: "dl"
+  name: "basic-pytorch"
+  dl_settings:
+    batch_size: 2
+    epochs: 1
