@@ -1,6 +1,6 @@
 """Step 2: 训练路由模型
 
-训练一个 DeBERTa-v3-base 模型（全量微调）预测每个教师的 NTE 分数。
+训练一个 DeBERTa-v3-base 模型（全量微调）预测每个教师的 NTE 桶（分类模式）。
 
 使用方法:
     python step2_train_router.py --config configs/step2_train_router.yaml
@@ -17,7 +17,7 @@ from engine.backbones.loader import load_backbone
 from engine.datas.loader import load_dataset
 from engine.trainers.loader import load_trainer
 
-from methods.step2_router import RouterRegressor, train_step, eval_step
+from methods.step2_router import RouterClassifier, train_step, eval_step
 
 
 # ==================== Prompt 模板 ====================
@@ -313,18 +313,61 @@ def run_fn(config: Dict, cache: Dict[str, Any]) -> Dict[str, Any]:
     hidden_dim = config["backbone_settings"]["encoder_settings"]["hidden_dim"]
     logger.info(f"Hidden dimension: {hidden_dim}")
 
-    # 创建 RouterRegressor (回归模式)
-    logger.info("创建 RouterRegressor (回归模式)...")
+    # 检查是否启用桶化模式
+    use_bucketing = method_cfg.get("use_bucketing", False)
 
-    model_kwargs = {
-        "encoder_backbone": encoder_backbone,
-        "num_teachers": num_teachers,
-        "hidden_dim": hidden_dim,
-        "dropout": method_cfg.get("dropout", 0.1),
-        "score_scale": 1.0
-    }
+    if use_bucketing:
+        # 分类模式（桶化）
+        logger.info("="*80)
+        logger.info("创建 RouterClassifier (分类模式 - 桶化)...")
+        logger.info("="*80)
 
-    router = RouterRegressor(**model_kwargs)
+        num_buckets = method_cfg.get("num_buckets", 5)
+        teacher_bucket_ranges = method_cfg.get("teacher_bucket_ranges", {})
+        teacher_bucket_centers = method_cfg.get("teacher_bucket_centers", {})
+
+        logger.info(f"桶数量: {num_buckets}")
+
+        # 验证桶配置
+        if not teacher_bucket_ranges or not teacher_bucket_centers:
+            raise ValueError(
+                "桶化模式需要 teacher_bucket_ranges 和 teacher_bucket_centers 配置！\n"
+                "这些配置应该在 preload_fn 中通过自适应分桶生成。"
+            )
+
+        # 打印每个教师的桶配置
+        for teacher_name in required_teachers:
+            if teacher_name in teacher_bucket_ranges:
+                logger.info(f"  {teacher_name}:")
+                logger.info(f"    bucket_ranges: {[round(x, 4) for x in teacher_bucket_ranges[teacher_name]]}")
+                logger.info(f"    bucket_centers: {[round(x, 4) for x in teacher_bucket_centers[teacher_name]]}")
+
+        model_kwargs = {
+            "encoder_backbone": encoder_backbone,
+            "num_teachers": num_teachers,
+            "teacher_names": required_teachers,
+            "num_buckets": num_buckets,
+            "hidden_dim": hidden_dim,
+            "dropout": method_cfg.get("dropout", 0.1)
+        }
+
+        router = RouterClassifier(**model_kwargs)
+
+    else:
+        # 回归模式（向后兼容）
+        logger.info("创建 RouterRegressor (回归模式)...")
+
+        from methods.step2_router import RouterRegressor  # 导入回归模型
+
+        model_kwargs = {
+            "encoder_backbone": encoder_backbone,
+            "num_teachers": num_teachers,
+            "hidden_dim": hidden_dim,
+            "dropout": method_cfg.get("dropout", 0.1),
+            "score_scale": 1.0
+        }
+
+        router = RouterRegressor(**model_kwargs)
 
     # 重新组织数据集: 将 val 作为 test 传给 trainer
     # Trainer 的 evaluate() 方法会使用 splits["test"]
@@ -356,6 +399,11 @@ def run_fn(config: Dict, cache: Dict[str, Any]) -> Dict[str, Any]:
 
     # 注册额外信息（传递给train_step和eval_step）
     trainer.register_model("required_teachers", required_teachers)
+
+    if use_bucketing:
+        # 桶化模式：传递桶配置
+        trainer.register_model("teacher_bucket_ranges", teacher_bucket_ranges)
+        trainer.register_model("teacher_bucket_centers", teacher_bucket_centers)
 
     # 注册训练和评估步骤
     trainer.register_train_step(train_step)

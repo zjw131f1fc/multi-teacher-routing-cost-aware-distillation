@@ -1,4 +1,4 @@
-# Step2: 训练路由模型配置（使用 DeBERTa Encoder，回归模式）
+# Step2: 训练路由模型配置（使用 DeBERTa Encoder，分类模式 - 桶化）
 
 global_settings:
   seed: 42
@@ -60,12 +60,12 @@ trainer_settings:
     optimizers:
       router:
         type: "adamw"
-        lr: 2.0e-4  # DeBERTa 微调推荐学习率
+        lr: 2.0e-5  # DeBERTa 微调推荐学习率（分类任务）
         weight_decay: 0.01
 
 method_settings:
   # Study name (用于日志标识和checkpoint保存)
-  study_name: "step2_train_router_deberta"
+  study_name: "step2_train_router_classifier"
 
   # 必需的教师列表（需要与 Step1 一致）
   required_teachers:
@@ -74,3 +74,18 @@ method_settings:
 
   # 模型参数
   dropout: 0.1               # Dropout rate
+
+  # 桶化配置（分类模式）
+  use_bucketing: true        # 启用桶化（分类模式）
+  num_buckets: 5             # 桶数量（D, C, B, A, S）
+
+  # 自适应分桶配置
+  adaptive_bucketing: true   # 启用自适应分桶（为每个教师独立分桶）
+  bucketing_method: "kmeans" # 分桶方法: "kmeans", "quantile", "uniform"
+                             # - kmeans: 最小化量化误差（推荐）
+                             # - quantile: 样本均衡分布
+                             # - uniform: 等宽桶
+  bucketing_balance_weight: 0.0  # 均匀性权重（0到1之间）
+                                 # - 0: 只考虑量化误差（默认，推荐）
+                                 # - 1: 只考虑样本分布均匀性
+                                 # - 0.5: 两者权重相等
