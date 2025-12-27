@@ -154,9 +154,10 @@ def train_step(batch: Dict[str, Any], device: str, info: Dict[str, Any]) -> Dict
     if valid_teachers > 0:
         total_loss = total_loss / valid_teachers
 
-    # 计算桶预测准确率
+    # 计算桶预测准确率（分教师统计）
     with torch.no_grad():
-        correct_count = 0
+        per_teacher_acc = {}
+        total_correct = 0
         total_count = 0
 
         for teacher in required_teachers:
@@ -167,25 +168,38 @@ def train_step(batch: Dict[str, Any], device: str, info: Dict[str, Any]) -> Dict
             # 预测的桶
             pred_buckets = torch.argmax(logits, dim=1)  # [batch]
 
-            # 计算准确率（只考虑有效样本）
+            # 计算该教师的准确率
             valid_mask = mask > 0
             if valid_mask.sum() > 0:
                 correct = (pred_buckets[valid_mask] == targets[valid_mask]).sum().item()
                 total = valid_mask.sum().item()
-                correct_count += correct
-                total_count += total
+                per_teacher_acc[teacher] = correct / total
 
-        bucket_acc = correct_count / total_count if total_count > 0 else 0.0
+                total_correct += correct
+                total_count += total
+            else:
+                per_teacher_acc[teacher] = 0.0
+
+        # 总体准确率
+        bucket_acc = total_correct / total_count if total_count > 0 else 0.0
 
     # 返回损失字典和指标
+    metrics = {
+        "bucket_acc": bucket_acc  # 总体桶预测准确率
+    }
+
+    # 添加每个教师的准确率
+    for teacher in required_teachers:
+        # 将教师名称中的特殊字符替换为下划线（用于指标名称）
+        teacher_key = teacher.replace(".", "_").replace("-", "_")
+        metrics[f"bucket_acc_{teacher_key}"] = per_teacher_acc[teacher]
+
     return {
         "router": {
             "loss": total_loss,
             "ce_loss": total_loss.item()
         },
-        "metrics": {
-            "bucket_acc": bucket_acc  # 桶预测准确率
-        }
+        "metrics": metrics
     }
 
 
@@ -200,8 +214,9 @@ def eval_step(batch: Dict[str, Any], device: str, info: Dict[str, Any]) -> Dict[
     返回:
         metrics: {
             "ce_loss": 交叉熵损失,
-            "bucket_acc": 桶预测准确率（预测桶 == 真实桶）,
-            "teacher_acc": 教师选择准确率（最重要！预测最佳教师 == 真实最佳教师）
+            "bucket_acc": 总体桶预测准确率,
+            "bucket_acc_{teacher}": 各教师的桶预测准确率,
+            "teacher_acc": 教师选择准确率 ⭐ 最重要！
         }
     """
     # 获取模型和配置
@@ -239,9 +254,10 @@ def eval_step(batch: Dict[str, Any], device: str, info: Dict[str, Any]) -> Dict[
 
     ce_loss_value = (total_loss / valid_teachers).item() if valid_teachers > 0 else 0.0
 
-    # 计算桶预测准确率
-    bucket_correct = 0
-    bucket_total = 0
+    # 计算桶预测准确率（分教师统计）
+    per_teacher_bucket_acc = {}
+    total_bucket_correct = 0
+    total_bucket_count = 0
 
     for teacher in required_teachers:
         logits = logits_dict[teacher]
@@ -252,10 +268,17 @@ def eval_step(batch: Dict[str, Any], device: str, info: Dict[str, Any]) -> Dict[
         valid_mask = mask > 0
 
         if valid_mask.sum() > 0:
-            bucket_correct += (pred_buckets[valid_mask] == targets[valid_mask]).sum().item()
-            bucket_total += valid_mask.sum().item()
+            correct = (pred_buckets[valid_mask] == targets[valid_mask]).sum().item()
+            total = valid_mask.sum().item()
+            per_teacher_bucket_acc[teacher] = correct / total
 
-    bucket_acc = bucket_correct / bucket_total if bucket_total > 0 else 0.0
+            total_bucket_correct += correct
+            total_bucket_count += total
+        else:
+            per_teacher_bucket_acc[teacher] = 0.0
+
+    # 总体桶预测准确率
+    bucket_acc = total_bucket_correct / total_bucket_count if total_bucket_count > 0 else 0.0
 
     # 计算教师选择准确率（基于桶中心值）⭐ 最重要的指标
     # 将桶索引转换为对应的桶中心分数，然后选择最佳教师
@@ -291,8 +314,16 @@ def eval_step(batch: Dict[str, Any], device: str, info: Dict[str, Any]) -> Dict[
 
     teacher_acc = teacher_correct / teacher_total if teacher_total > 0 else 0.0
 
-    return {
+    # 组装指标
+    metrics = {
         "ce_loss": ce_loss_value,
-        "bucket_acc": bucket_acc,      # 桶预测准确率
+        "bucket_acc": bucket_acc,      # 总体桶预测准确率
         "teacher_acc": teacher_acc,    # 教师选择准确率 ⭐ 最重要！
     }
+
+    # 添加每个教师的桶预测准确率
+    for teacher in required_teachers:
+        teacher_key = teacher.replace(".", "_").replace("-", "_")
+        metrics[f"bucket_acc_{teacher_key}"] = per_teacher_bucket_acc[teacher]
+
+    return metrics

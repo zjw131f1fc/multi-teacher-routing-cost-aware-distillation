@@ -47,7 +47,7 @@ trainer_settings:
     print_loss_every_batches: 10  # 每10个batch打印loss
     eval_every_batches: 50      # 每50个batch评估一次
     save_every_batches: 0      # 0表示不按batch保存
-    save_every_epochs: 1       # 每1个epoch保存一次
+    save_every_epochs: 0       # 每1个epoch保存一次
     eval_max_samples: 0        # 0表示全量评估
     grad_clip_max_norm: 1.0    # 梯度裁剪阈值
 
