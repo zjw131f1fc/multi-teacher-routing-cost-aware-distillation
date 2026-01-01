@@ -1,26 +1,93 @@
-"""训练和评估步骤函数（桶化分类模式）"""
+"""训练和评估步骤函数（支持桶化分类模式和回归模式）"""
 
 import torch
 import torch.nn.functional as F
 from typing import Dict, Any, List
 import numpy as np
+import random
 
 
-def _build_prompt(instruction: str) -> str:
-    """构建路由器的输入prompt
+class ExpandedDatasetWrapper:
+    """数据集包装器：将原始样本展开为 [问题+教师] 对
+
+    原始数据格式:
+    {
+        "instruction": str,
+        "responses": {
+            "teacher1": {"nte_scores": {"nte_score": float}},
+            "teacher2": {"nte_scores": {"nte_score": float}}
+        }
+    }
+
+    展开后格式:
+    {
+        "instruction": str,
+        "teacher_name": str,
+        "nte_score": float
+    }
+
+    每次训练时，每个样本随机选择一个教师，实现 "分batch：每个batch随机采样 [问题+随机教师]"
+    """
+
+    def __init__(self, original_dataset, required_teachers, seed=42):
+        """
+        参数:
+            original_dataset: 原始数据集（未展开）
+            required_teachers: 需要的教师列表
+            seed: 随机种子
+        """
+        self.original_dataset = original_dataset
+        self.required_teachers = required_teachers
+        self.seed = seed
+        self.rng = random.Random(seed)
+
+        # 预先过滤：只保留包含所有教师NTE分数的样本
+        self.valid_samples = []
+        for sample in original_dataset:
+            responses = sample.get("responses", {})
+            has_all_scores = all(
+                teacher in responses and "nte_scores" in responses[teacher]
+                for teacher in required_teachers
+            )
+            if has_all_scores:
+                self.valid_samples.append(sample)
+
+    def __len__(self):
+        # 长度等于有效样本数（每个样本每个epoch只采样一次，但随机选择教师）
+        return len(self.valid_samples)
+
+    def __getitem__(self, idx):
+        """获取展开后的样本（随机选择一个教师）"""
+        sample = self.valid_samples[idx]
+        instruction = sample["instruction"]
+        responses = sample["responses"]
+
+        # 随机选择一个教师（每次调用都重新随机，实现随机采样）
+        teacher_name = self.rng.choice(self.required_teachers)
+
+        # 提取该教师的NTE分数
+        nte_score = responses[teacher_name]["nte_scores"]["nte_score"]
+
+        return {
+            "instruction": instruction,
+            "teacher_name": teacher_name,
+            "nte_score": nte_score
+        }
+
+
+def _build_prompt(instruction: str, teacher_name: str) -> str:
+    """构建路由器的输入prompt（包含教师名称）
 
     参数:
         instruction: 问题文本
+        teacher_name: 教师模型名称
 
     返回:
         prompt: 构建好的prompt
     """
-    return f"""Analyze the following problem and determine which AI model would be most suitable to answer it.
+    return f"""Question: {instruction}
 
-Problem:
-{instruction}
-
-Analysis:"""
+Teacher: {teacher_name}"""
 
 
 def _score_to_bucket(score: float, bucket_ranges: List[float]) -> int:
@@ -37,6 +104,46 @@ def _score_to_bucket(score: float, bucket_ranges: List[float]) -> int:
         if score < threshold:
             return i
     return len(bucket_ranges)  # 最后一个桶
+
+
+def _process_batch_regression(batch, required_teachers, device):
+    """处理batch数据（回归模式）：每个样本展开为 [问题+教师] 对
+
+    参数:
+        batch: list of samples from dataset，每个样本已经包含 teacher_name 字段
+        required_teachers: list of teacher names（用于验证）
+        device: 设备
+
+    返回:
+        {
+            "prompts": [batch_size] 文本列表（包含教师名称），
+            "target_scores": [batch_size] 目标NTE分数，
+            "teacher_names": [batch_size] 对应的教师名称列表
+        }
+    """
+    prompts = []
+    target_scores = []
+    teacher_names_out = []
+
+    for sample in batch:
+        instruction = sample["instruction"]
+        teacher_name = sample["teacher_name"]  # 从样本中获取教师名称
+        nte_score = sample["nte_score"]  # 从样本中获取NTE分数
+
+        # 构建prompt（包含教师名称）
+        prompt = _build_prompt(instruction, teacher_name)
+        prompts.append(prompt)
+        target_scores.append(nte_score)
+        teacher_names_out.append(teacher_name)
+
+    # 转换为 tensor
+    target_scores_tensor = torch.tensor(target_scores, dtype=torch.float32, device=device)
+
+    return {
+        "prompts": prompts,
+        "target_scores": target_scores_tensor,  # [batch_size]
+        "teacher_names": teacher_names_out
+    }
 
 
 def _process_batch(batch, required_teachers, teacher_bucket_ranges, device):
@@ -92,6 +199,70 @@ def _process_batch(batch, required_teachers, teacher_bucket_ranges, device):
         "prompts": prompts,
         "target_buckets": target_buckets,
         "masks": masks
+    }
+
+
+def train_step_regression(batch: Dict[str, Any], device: str, info: Dict[str, Any]) -> Dict[str, Dict[str, torch.Tensor]]:
+    """训练步骤（回归模式 - 单教师NTE分数预测）
+
+    参数:
+        batch: 批次数据，每个样本格式为:
+            {
+                "instruction": str,
+                "teacher_name": str,  # 单个教师名称
+                "nte_score": float    # 该教师的NTE分数
+            }
+        device: 设备
+        info: 训练信息，包含:
+            - models: 注册的模型字典（包含router, required_teachers）
+            - config: 配置对象
+
+    返回:
+        losses: {
+            "router": {
+                "loss": MSE损失,
+                "mse_loss": MSE损失值
+            },
+            "metrics": {
+                "mae": 平均绝对误差
+            }
+        }
+    """
+    # 获取模型和配置
+    router = info["models"]["router"]
+    required_teachers = info["models"]["required_teachers"]
+
+    # 处理batch
+    processed = _process_batch_regression(batch, required_teachers, device)
+
+    prompts = processed["prompts"]
+    target_scores = processed["target_scores"]  # [batch_size]
+
+    # 获取模型的dtype
+    model_dtype = next(router.parameters()).dtype
+
+    # 前向传播
+    pred_scores = router(prompts)  # [batch_size]
+
+    # 转换target为模型的dtype
+    target_scores = target_scores.to(dtype=model_dtype)
+    pred_scores = pred_scores.to(target_scores.device)
+
+    # 计算MSE损失
+    mse_loss = F.mse_loss(pred_scores, target_scores)
+
+    # 计算MAE（用于监控）
+    with torch.no_grad():
+        mae = F.l1_loss(pred_scores, target_scores).item()
+
+    return {
+        "router": {
+            "loss": mse_loss,
+            "mse_loss": mse_loss.item()
+        },
+        "metrics": {
+            "mae": mae
+        }
     }
 
 
@@ -200,6 +371,112 @@ def train_step(batch: Dict[str, Any], device: str, info: Dict[str, Any]) -> Dict
             "ce_loss": total_loss.item()
         },
         "metrics": metrics
+    }
+
+
+def eval_step_regression(batch: Dict[str, Any], device: str, info: Dict[str, Any]) -> Dict[str, Any]:
+    """评估步骤（回归模式 - 批量推理获取教师路由准确率）
+
+    参数:
+        batch: 批次数据，原始格式（每个样本包含所有教师的响应）
+        device: 设备
+        info: 评估信息
+
+    返回:
+        metrics: {
+            "mse_loss": MSE损失,
+            "mae": 平均绝对误差,
+            "teacher_acc": 教师选择准确率 ⭐ 最重要！
+        }
+    """
+    # 获取模型和配置
+    router = info["models"]["router"]
+    required_teachers = info["models"]["required_teachers"]
+
+    # 获取模型的dtype
+    model_dtype = next(router.parameters()).dtype
+
+    # 批量推理：为每个样本x每个教师构建prompt
+    all_prompts = []
+    all_targets = []
+    sample_indices = []  # 记录每个prompt对应的样本索引
+    teacher_indices = []  # 记录每个prompt对应的教师索引
+
+    for sample_idx, sample in enumerate(batch):
+        instruction = sample["instruction"]
+        responses = sample.get("responses", {})
+
+        for teacher_idx, teacher_name in enumerate(required_teachers):
+            # 检查该教师是否有NTE分数
+            if teacher_name in responses and "nte_scores" in responses[teacher_name]:
+                nte_score = responses[teacher_name]["nte_scores"]["nte_score"]
+
+                # 构建prompt
+                prompt = _build_prompt(instruction, teacher_name)
+                all_prompts.append(prompt)
+                all_targets.append(nte_score)
+                sample_indices.append(sample_idx)
+                teacher_indices.append(teacher_idx)
+
+    if len(all_prompts) == 0:
+        return {
+            "mse_loss": 0.0,
+            "mae": 0.0,
+            "teacher_acc": 0.0
+        }
+
+    # 转换为 tensor
+    target_scores = torch.tensor(all_targets, dtype=model_dtype, device=device)
+
+    # 前向传播（批量）
+    with torch.no_grad():
+        pred_scores = router(all_prompts)  # [num_prompts]
+
+    # 计算MSE和MAE
+    mse_loss = F.mse_loss(pred_scores, target_scores).item()
+    mae = F.l1_loss(pred_scores, target_scores).item()
+
+    # 计算教师选择准确率
+    # 重组预测和真实分数：按样本分组
+    num_samples = len(batch)
+    sample_pred_scores = {}  # {sample_idx: {teacher_idx: score}}
+    sample_true_scores = {}  # {sample_idx: {teacher_idx: score}}
+
+    for i, (sample_idx, teacher_idx) in enumerate(zip(sample_indices, teacher_indices)):
+        if sample_idx not in sample_pred_scores:
+            sample_pred_scores[sample_idx] = {}
+            sample_true_scores[sample_idx] = {}
+
+        sample_pred_scores[sample_idx][teacher_idx] = pred_scores[i].item()
+        sample_true_scores[sample_idx][teacher_idx] = target_scores[i].item()
+
+    # 统计教师选择准确率
+    teacher_correct = 0
+    teacher_total = 0
+
+    for sample_idx in range(num_samples):
+        if sample_idx not in sample_pred_scores:
+            continue
+
+        pred_dict = sample_pred_scores[sample_idx]
+        true_dict = sample_true_scores[sample_idx]
+
+        # 只统计所有教师都有效的样本
+        if len(pred_dict) == len(required_teachers):
+            # 选择预测分数最高的教师
+            pred_best_idx = max(pred_dict, key=pred_dict.get)
+            true_best_idx = max(true_dict, key=true_dict.get)
+
+            if pred_best_idx == true_best_idx:
+                teacher_correct += 1
+            teacher_total += 1
+
+    teacher_acc = teacher_correct / teacher_total if teacher_total > 0 else 0.0
+
+    return {
+        "mse_loss": mse_loss,
+        "mae": mae,
+        "teacher_acc": teacher_acc
     }
 
 

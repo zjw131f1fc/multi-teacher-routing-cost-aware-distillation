@@ -95,7 +95,14 @@ class BasicPytorchTrainer:
         # 持久化存储（跨评估调用保持状态，如EMA score等）
         # 每个新的trial会重新创建trainer，所以这个字典会被重置
         self.persistent_state: Dict[str, Any] = {}
-        
+
+        # 训练历史跟踪（用于绘制曲线）
+        self.training_history = {
+            "epoch_losses": {},      # {loss_name: [epoch1_avg, epoch2_avg, ...]}
+            "epoch_metrics": {},     # {metric_name: [epoch1_avg, epoch2_avg, ...]}
+            "eval_history": [],      # [{epoch: int, metrics: {...}}, ...]
+        }
+
         # 从cache获取Optuna状态池（如果有）
         if isinstance(dataset_bundle, dict):
             self._state_pool = dataset_bundle.get('_state_pool')
@@ -584,11 +591,21 @@ class BasicPytorchTrainer:
                     avg_loss = np.mean(loss_values)
                     loss_summary.append(f"{loss_name}={avg_loss:.4f}")
 
+                    # 记录到历史
+                    if loss_name not in self.training_history["epoch_losses"]:
+                        self.training_history["epoch_losses"][loss_name] = []
+                    self.training_history["epoch_losses"][loss_name].append(float(avg_loss))
+
                 # 计算平均 metrics
                 metric_summary = []
                 for metric_name, metric_values in epoch_metrics.items():
                     avg_metric = np.mean(metric_values)
                     metric_summary.append(f"{metric_name}={avg_metric:.3f}")
+
+                    # 记录到历史
+                    if metric_name not in self.training_history["epoch_metrics"]:
+                        self.training_history["epoch_metrics"][metric_name] = []
+                    self.training_history["epoch_metrics"][metric_name].append(float(avg_metric))
 
                 # 打印
                 summary_parts = loss_summary + metric_summary
@@ -597,6 +614,11 @@ class BasicPytorchTrainer:
             # 每隔 N 个 epoch 保存检查点
             if self.save_every_epochs and (epoch + 1) % self.save_every_epochs == 0:
                 self._save_checkpoint(epoch=epoch, batch=None)
+
+        # 训练结束：绘制并保存训练曲线
+        if self.logger:
+            self.logger.info("训练完成！正在绘制训练曲线...")
+        self._plot_training_curves()
 
     # ---------------------- 评估循环 ----------------------
     def evaluate(self, max_samples: Optional[int] = None, trigger_info: Optional[Dict[str, int]] = None) -> Dict[str, float]:
@@ -712,6 +734,14 @@ class BasicPytorchTrainer:
                     self.logger.info(f"  {teacher_name}:")
                     self.logger.info(f"    预测分布: counts={dist['predicted']['counts']}, percentages={[f'{p:.1f}%' for p in dist['predicted']['percentages']]}")
                     self.logger.info(f"    真实分布: counts={dist['ground_truth']['counts']}, percentages={[f'{p:.1f}%' for p in dist['ground_truth']['percentages']]}")
+
+        # 记录评估历史（排除非标量值）
+        if trigger_info and "epoch" in trigger_info:
+            eval_record = {
+                "epoch": trigger_info["epoch"],
+                "metrics": {k: v for k, v in agg.items() if k != "teacher_bucket_dist" and isinstance(v, (int, float))}
+            }
+            self.training_history["eval_history"].append(eval_record)
 
         return agg
 
@@ -890,3 +920,104 @@ class BasicPytorchTrainer:
         else:
             hours = seconds / 3600
             return f"{hours:.2f}h"
+
+    def _plot_training_curves(self):
+        """绘制并保存训练曲线到输出目录"""
+        import os
+        import matplotlib
+        matplotlib.use('Agg')  # 使用非交互式后端
+        import matplotlib.pyplot as plt
+
+        # 获取输出目录
+        if isinstance(self.config, dict):
+            gs = self.config["global_settings"]
+        else:
+            gs = self.config.global_settings
+        save_root = gs["save_dir"]
+        tag = gs["experiment_tag"]
+        out_dir = os.path.join(save_root, tag)
+        os.makedirs(out_dir, exist_ok=True)
+
+        epoch_losses = self.training_history["epoch_losses"]
+        epoch_metrics = self.training_history["epoch_metrics"]
+        eval_history = self.training_history["eval_history"]
+
+        if not epoch_losses and not epoch_metrics and not eval_history:
+            if self.logger:
+                self.logger.info("没有训练历史数据，跳过绘图")
+            return
+
+        epochs = list(range(1, len(next(iter(epoch_losses.values()))) + 1)) if epoch_losses else []
+
+        # === 绘制 Loss 曲线 ===
+        if epoch_losses:
+            plt.figure(figsize=(12, 6))
+            for loss_name, loss_values in epoch_losses.items():
+                plt.plot(epochs, loss_values, marker='o', label=loss_name, linewidth=2, markersize=4)
+
+            plt.xlabel('Epoch', fontsize=12)
+            plt.ylabel('Loss', fontsize=12)
+            plt.title('Training Loss Curves', fontsize=14, fontweight='bold')
+            plt.legend(loc='best', fontsize=10)
+            plt.grid(True, alpha=0.3)
+            plt.tight_layout()
+
+            loss_plot_path = os.path.join(out_dir, 'training_loss.png')
+            plt.savefig(loss_plot_path, dpi=150, bbox_inches='tight')
+            plt.close()
+
+            if self.logger:
+                self.logger.info(f"Loss曲线已保存: {loss_plot_path}")
+
+        # === 绘制 Metrics 曲线 ===
+        if epoch_metrics:
+            plt.figure(figsize=(12, 6))
+            for metric_name, metric_values in epoch_metrics.items():
+                plt.plot(epochs, metric_values, marker='s', label=metric_name, linewidth=2, markersize=4)
+
+            plt.xlabel('Epoch', fontsize=12)
+            plt.ylabel('Metric Value', fontsize=12)
+            plt.title('Training Metrics Curves', fontsize=14, fontweight='bold')
+            plt.legend(loc='best', fontsize=10)
+            plt.grid(True, alpha=0.3)
+            plt.tight_layout()
+
+            metrics_plot_path = os.path.join(out_dir, 'training_metrics.png')
+            plt.savefig(metrics_plot_path, dpi=150, bbox_inches='tight')
+            plt.close()
+
+            if self.logger:
+                self.logger.info(f"Metrics曲线已保存: {metrics_plot_path}")
+
+        # === 绘制评估历史曲线 ===
+        if eval_history:
+            # 按指标分组
+            eval_metrics = {}
+            eval_epochs = []
+
+            for record in eval_history:
+                eval_epochs.append(record["epoch"])
+                for metric_name, metric_value in record["metrics"].items():
+                    if metric_name not in eval_metrics:
+                        eval_metrics[metric_name] = []
+                    eval_metrics[metric_name].append(metric_value)
+
+            if eval_metrics:
+                plt.figure(figsize=(12, 6))
+                for metric_name, metric_values in eval_metrics.items():
+                    plt.plot(eval_epochs, metric_values, marker='D', label=f"eval_{metric_name}",
+                            linewidth=2, markersize=5, linestyle='--')
+
+                plt.xlabel('Epoch', fontsize=12)
+                plt.ylabel('Evaluation Metric', fontsize=12)
+                plt.title('Evaluation Metrics Curves', fontsize=14, fontweight='bold')
+                plt.legend(loc='best', fontsize=10)
+                plt.grid(True, alpha=0.3)
+                plt.tight_layout()
+
+                eval_plot_path = os.path.join(out_dir, 'evaluation_metrics.png')
+                plt.savefig(eval_plot_path, dpi=150, bbox_inches='tight')
+                plt.close()
+
+                if self.logger:
+                    self.logger.info(f"评估曲线已保存: {eval_plot_path}")

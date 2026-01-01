@@ -1,0 +1,99 @@
+# Step3: 知识蒸馏配置（使用 Qwen2.5-0.5B-Instruct 作为学生模型）
+
+global_settings:
+  seed: 42
+  device: "cuda"
+  dtype: "bfloat16"  # 使用 BF16 训练（节省显存）
+  dataset_cache_dir: "/data/users/zjw/dataset_cache"
+  hf_cache_dir: "/data/users/zjw/huggingface_cache"
+  study_name: "step3_distill"
+
+config_settings:
+  enable_dict_overrides: true
+  enable_yaml_overrides: true
+  log_config_on_load: true
+
+manager_settings:
+  name: "basic"
+  mode: "direct"  # direct模式：单任务直接运行
+  num_subtasks: 1
+  available_gpus: [0]
+  gpus_per_subtask: 4
+  poll_interval: 5.0
+
+dataset_settings:
+  type: "distill"
+  name: "distill-openr1-math"
+  distill_settings:
+    split:
+      train: 'all'   # 从HF加载的训练数据总量
+      test: -1       # 占位符，不使用
+
+backbone_settings:
+  type: "llm"
+  name: "qwen2.5-0.5b-instruct"
+  model_id: "Qwen/Qwen2.5-0.5B-Instruct"  # HuggingFace 模型 ID
+  llm_settings:
+    device_map: "auto"  # 自动分配设备
+    attn_implementation: "flash_attention_2"  # 使用 Flash Attention 2（如果可用）
+    torch_dtype: "bfloat16"  # 使用 BF16
+
+trainer_settings:
+  type: "dl"
+  name: "basic-pytorch"
+  dl_settings:
+    batch_size: 4               # 批次大小（蒸馏时显存占用较大）
+    epochs: 3                   # 训练轮数
+    print_loss_every_batches: 50  # 每50个batch打印loss
+    eval_every_batches: 500      # 每500个batch评估一次
+    save_every_batches: 0        # 0表示不按batch保存
+    save_every_epochs: 1         # 每1个epoch保存一次
+    eval_max_samples: 500        # 验证集最多评估500个样本
+    grad_clip_max_norm: 1.0      # 梯度裁剪阈值
+
+    # Learning rate scheduler 配置
+    use_warmup: true             # 是否使用 warmup
+    warmup_ratio: 0.1            # warmup 占总步数的比例（10%）
+
+    # 优化器配置
+    optimizers:
+      student:
+        type: "adamw"
+        lr: 5.0e-5  # 学习率（蒸馏推荐学习率）
+        weight_decay: 0.01
+
+method_settings:
+  # Study name (用于日志标识和checkpoint保存)
+  study_name: "step3_distill_qwen0.5b"
+
+  # 必需的教师列表（需要与 Step1 和 Step2 一致）
+  required_teachers:
+    - "deepseek-r1"
+    - "qwen2.5-math-7b-instruct"
+
+  # ==================== 路由策略配置 ====================
+  # 可选值: "random", "model", "knn_stats", "best_teacher"
+  # routing_strategy: "random"
+
+  # 策略1: random - 随机选择教师（默认）
+  # routing_strategy: "random"
+
+  # 策略2: model - 基于路由模型（需要提供router_checkpoint）
+  # routing_strategy: "model"
+  # router_checkpoint: "checkpoints/step2_train_router/best_model.pt"
+
+  # 策略3: knn_stats - 基于KNN+统计学
+  # routing_strategy: "knn_stats"
+  # knn_k: 10  # KNN检索的邻居数量
+  # knn_encoder_model: "sentence-transformers/all-MiniLM-L6-v2"  # 编码器模型
+
+  # 策略4: best_teacher - 固定使用最强教师（基线策略）
+  routing_strategy: "best_teacher"
+  best_teacher_name: "deepseek-r1"  # 指定最强教师
+
+  # 路由器模型检查点路径（routing_strategy="model"时需要）
+  router_checkpoint: null
+
+  # 蒸馏相关参数
+  distill_temperature: 1.0      # 蒸馏温度（暂未使用，预留）
+  max_seq_length: 2048          # 最大序列长度

@@ -1,5 +1,5 @@
 """Step2 Router Models"""
 
-from .router_regressor import RouterRegressor
+from .router_regressor import RouterRegressor, RouterClassifier, RouterRegressorSingle
 
-__all__ = ["RouterRegressor"]
+__all__ = ["RouterRegressor", "RouterClassifier", "RouterRegressorSingle"]

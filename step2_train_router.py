@@ -17,7 +17,15 @@ from engine.backbones.loader import load_backbone
 from engine.datas.loader import load_dataset
 from engine.trainers.loader import load_trainer
 
-from methods.step2_router import RouterClassifier, train_step, eval_step
+from methods.step2_router import (
+    RouterClassifier,
+    RouterRegressorSingle,
+    train_step,
+    eval_step,
+    train_step_regression,
+    eval_step_regression,
+    ExpandedDatasetWrapper
+)
 
 
 # ==================== Prompt 模板 ====================
@@ -313,14 +321,69 @@ def run_fn(config: Dict, cache: Dict[str, Any]) -> Dict[str, Any]:
     hidden_dim = config["backbone_settings"]["encoder_settings"]["hidden_dim"]
     logger.info(f"Hidden dimension: {hidden_dim}")
 
-    # 检查是否启用桶化模式
-    use_bucketing = method_cfg.get("use_bucketing", False)
+    # 检查训练模式
+    mode = method_cfg.get("mode", "classification")  # 默认分类模式
+    use_bucketing = method_cfg.get("use_bucketing", mode == "classification")  # 向后兼容
 
-    if use_bucketing:
-        # 分类模式（桶化）
-        logger.info("="*80)
+    logger.info("="*80)
+    logger.info(f"训练模式: {mode}")
+    logger.info("="*80)
+
+    if mode == "regression_single":
+        # ============== 新模式：回归单教师分数预测 ==============
+        logger.info("创建 RouterRegressorSingle (回归模式 - 单教师)...")
+
+        model_kwargs = {
+            "encoder_backbone": encoder_backbone,
+            "hidden_dim": hidden_dim,
+            "dropout": method_cfg.get("dropout", 0.1)
+        }
+
+        router = RouterRegressorSingle(**model_kwargs)
+
+        # 包装数据集：展开为 [问题+教师] 对
+        logger.info("包装训练数据集: 展开为 [问题+教师] 对...")
+        train_dataset = dataset_bundle["splits"]["train"]
+        val_dataset = dataset_bundle["splits"]["val"]
+
+        wrapped_train = ExpandedDatasetWrapper(
+            train_dataset,
+            required_teachers,
+            seed=config["global_settings"]["seed"]
+        )
+        # 验证集保持原始格式（用于批量推理）
+        logger.info(f"训练集: {len(train_dataset)} 个原始样本 -> {len(wrapped_train)} 个展开样本")
+        logger.info(f"验证集: {len(val_dataset)} 个样本（保持原始格式）")
+
+        # 重新组织数据集
+        reorganized_bundle = {
+            "splits": {
+                "train": wrapped_train,  # 展开的训练集
+                "test": val_dataset      # 原始格式的验证集
+            },
+            "meta": dataset_bundle["meta"],
+            "judge": dataset_bundle.get("judge")
+        }
+
+        # 创建 Trainer
+        logger.info("创建 Trainer...")
+        trainer = load_trainer(config, reorganized_bundle)
+
+        # 注册模型
+        trainer.register_model("router", router)
+        trainer.add_param_group("router", list(router.parameters()))
+        trainer.setup_optimizers()
+
+        # 注册额外信息
+        trainer.register_model("required_teachers", required_teachers)
+
+        # 注册训练和评估步骤（使用回归版本）
+        trainer.register_train_step(train_step_regression)
+        trainer.register_eval_step(eval_step_regression)
+
+    elif use_bucketing or mode == "classification":
+        # ============== 分类模式（桶化） ==============
         logger.info("创建 RouterClassifier (分类模式 - 桶化)...")
-        logger.info("="*80)
 
         num_buckets = method_cfg.get("num_buckets", 5)
         teacher_bucket_ranges = method_cfg.get("teacher_bucket_ranges", {})
@@ -353,11 +416,43 @@ def run_fn(config: Dict, cache: Dict[str, Any]) -> Dict[str, Any]:
 
         router = RouterClassifier(**model_kwargs)
 
-    else:
-        # 回归模式（向后兼容）
-        logger.info("创建 RouterRegressor (回归模式)...")
+        # 重新组织数据集: 将 val 作为 test 传给 trainer
+        logger.info("重新组织数据集: 使用 val 作为评估集...")
+        reorganized_bundle = {
+            "splits": {
+                "train": dataset_bundle["splits"]["train"],
+                "test": dataset_bundle["splits"]["val"]
+            },
+            "meta": dataset_bundle["meta"],
+            "judge": dataset_bundle.get("judge")
+        }
 
-        from methods.step2_router import RouterRegressor  # 导入回归模型
+        logger.info(f"训练集大小: {len(reorganized_bundle['splits']['train'])}")
+        logger.info(f"验证集大小: {len(reorganized_bundle['splits']['test'])}")
+
+        # 创建 Trainer
+        logger.info("创建 Trainer...")
+        trainer = load_trainer(config, reorganized_bundle)
+
+        # 注册模型
+        trainer.register_model("router", router)
+        trainer.add_param_group("router", list(router.parameters()))
+        trainer.setup_optimizers()
+
+        # 注册额外信息
+        trainer.register_model("required_teachers", required_teachers)
+        trainer.register_model("teacher_bucket_ranges", teacher_bucket_ranges)
+        trainer.register_model("teacher_bucket_centers", teacher_bucket_centers)
+
+        # 注册训练和评估步骤
+        trainer.register_train_step(train_step)
+        trainer.register_eval_step(eval_step)
+
+    else:
+        # ============== 回归模式（向后兼容，多头） ==============
+        logger.info("创建 RouterRegressor (回归模式 - 多头，向后兼容)...")
+
+        from methods.step2_router import RouterRegressor
 
         model_kwargs = {
             "encoder_backbone": encoder_backbone,
@@ -369,45 +464,34 @@ def run_fn(config: Dict, cache: Dict[str, Any]) -> Dict[str, Any]:
 
         router = RouterRegressor(**model_kwargs)
 
-    # 重新组织数据集: 将 val 作为 test 传给 trainer
-    # Trainer 的 evaluate() 方法会使用 splits["test"]
-    logger.info("重新组织数据集: 使用 val 作为评估集...")
-    reorganized_bundle = {
-        "splits": {
-            "train": dataset_bundle["splits"]["train"],
-            "test": dataset_bundle["splits"]["val"]  # 使用 val 作为评估集
-        },
-        "meta": dataset_bundle["meta"],
-        "judge": dataset_bundle.get("judge")
-    }
+        # 重新组织数据集
+        reorganized_bundle = {
+            "splits": {
+                "train": dataset_bundle["splits"]["train"],
+                "test": dataset_bundle["splits"]["val"]
+            },
+            "meta": dataset_bundle["meta"],
+            "judge": dataset_bundle.get("judge")
+        }
 
-    logger.info(f"训练集大小: {len(reorganized_bundle['splits']['train'])}")
-    logger.info(f"验证集大小: {len(reorganized_bundle['splits']['test'])}")
+        logger.info(f"训练集大小: {len(reorganized_bundle['splits']['train'])}")
+        logger.info(f"验证集大小: {len(reorganized_bundle['splits']['test'])}")
 
-    # 创建 Trainer
-    logger.info("创建 Trainer...")
-    trainer = load_trainer(config, reorganized_bundle)
+        # 创建 Trainer
+        logger.info("创建 Trainer...")
+        trainer = load_trainer(config, reorganized_bundle)
 
-    # 注册模型
-    trainer.register_model("router", router)
+        # 注册模型
+        trainer.register_model("router", router)
+        trainer.add_param_group("router", list(router.parameters()))
+        trainer.setup_optimizers()
 
-    # 添加参数组（全量微调）
-    trainer.add_param_group("router", list(router.parameters()))
+        # 注册额外信息
+        trainer.register_model("required_teachers", required_teachers)
 
-    # 创建优化器
-    trainer.setup_optimizers()
-
-    # 注册额外信息（传递给train_step和eval_step）
-    trainer.register_model("required_teachers", required_teachers)
-
-    if use_bucketing:
-        # 桶化模式：传递桶配置
-        trainer.register_model("teacher_bucket_ranges", teacher_bucket_ranges)
-        trainer.register_model("teacher_bucket_centers", teacher_bucket_centers)
-
-    # 注册训练和评估步骤
-    trainer.register_train_step(train_step)
-    trainer.register_eval_step(eval_step)
+        # 注册训练和评估步骤
+        trainer.register_train_step(train_step)
+        trainer.register_eval_step(eval_step)
 
     # 执行训练
     logger.info("开始训练...")

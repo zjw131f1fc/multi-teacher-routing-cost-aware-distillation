@@ -1,4 +1,4 @@
-# Step2: 训练路由模型配置（使用 DeBERTa Encoder，分类模式 - 桶化）
+# Step2: 训练路由模型配置（使用 DeBERTa Encoder，回归模式 - 单教师分数预测）
 
 global_settings:
   seed: 42
@@ -43,9 +43,9 @@ trainer_settings:
   name: "basic-pytorch"
   dl_settings:
     batch_size: 32              # 批次大小（DeBERTa 比 LLM 小，可以用更大的 batch）
-    epochs: 50                  # 训练轮数
-    print_loss_every_batches: 10  # 每10个batch打印loss
-    eval_every_batches: 50      # 每50个batch评估一次
+    epochs: 200                  # 训练轮数
+    print_loss_every_batches: 100  # 每10个batch打印loss
+    eval_every_batches: 500      # 每50个batch评估一次
     save_every_batches: 0      # 0表示不按batch保存
     save_every_epochs: 0       # 每1个epoch保存一次
     eval_max_samples: 0        # 0表示全量评估
@@ -65,7 +65,7 @@ trainer_settings:
 
 method_settings:
   # Study name (用于日志标识和checkpoint保存)
-  study_name: "step2_train_router_classifier"
+  study_name: "step2_train_router_regression_single"
 
   # 必需的教师列表（需要与 Step1 一致）
   required_teachers:
@@ -75,17 +75,8 @@ method_settings:
   # 模型参数
   dropout: 0.1               # Dropout rate
 
-  # 桶化配置（分类模式）
-  use_bucketing: true        # 启用桶化（分类模式）
-  num_buckets: 5             # 桶数量（D, C, B, A, S）
-
-  # 自适应分桶配置
-  adaptive_bucketing: true   # 启用自适应分桶（为每个教师独立分桶）
-  bucketing_method: "kmeans" # 分桶方法: "kmeans", "quantile", "uniform"
-                             # - kmeans: 最小化量化误差（推荐）
-                             # - quantile: 样本均衡分布
-                             # - uniform: 等宽桶
-  bucketing_balance_weight: 0.0  # 均匀性权重（0到1之间）
-                                 # - 0: 只考虑量化误差（默认，推荐）
-                                 # - 1: 只考虑样本分布均匀性
-                                 # - 0.5: 两者权重相等
+  # 回归模式配置（单教师分数预测）
+  mode: "regression_single"  # 新模式：回归单教师分数
+                             # - "classification": 分类模式（桶化，旧）
+                             # - "regression": 回归模式（多头，旧）
+                             # - "regression_single": 回归模式（单头，新）

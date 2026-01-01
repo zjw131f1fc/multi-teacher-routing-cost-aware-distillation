@@ -1,6 +1,7 @@
 """RouterClassifier 模型: 使用 DeBERTa Encoder 预测教师 NTE 桶（分类模式）
+RouterRegressorSingle 模型: 使用 DeBERTa Encoder 预测单个教师的 NTE 分数（回归模式）
 
-架构:
+架构 (分类模式):
     输入: instruction (问题文本，带prompt)
         ↓
     DeBERTa Encoder (microsoft/deberta-v3-base, 全量微调)
@@ -20,6 +21,21 @@
         ...
     }
 
+架构 (回归模式 - 单教师):
+    输入: "Question: [instruction]\n\nTeacher: [teacher_name]"
+        ↓
+    DeBERTa Encoder (microsoft/deberta-v3-base, 全量微调)
+        ↓
+    Mean Pooling
+        ↓
+    LayerNorm
+        ↓
+    单个回归头: hidden_dim → hidden_dim//4 → 1
+        ↓
+    Sigmoid (约束到 [0, 1])
+        ↓
+    输出: NTE分数 (scalar)
+
 桶定义（使用自适应分桶）:
     - Bucket 0 (D级): 最低 NTE 区间
     - Bucket 1 (C级): 较低 NTE 区间
@@ -31,6 +47,86 @@
 import torch
 import torch.nn as nn
 from typing import List, Dict
+
+
+class RouterRegressorSingle(nn.Module):
+    """路由回归模型（单教师版本）: 预测单个教师的 NTE 分数
+
+    适用场景：
+    - prompt中包含教师名称: "Question: [...]\n\nTeacher: [name]"
+    - 每次forward只预测一个教师的NTE分数
+    - 训练时：每个样本随机选择一个教师
+    - 推理时：批量forward获取所有教师分数
+
+    参数:
+        encoder_backbone: Encoder backbone (DeBERTa)
+        hidden_dim: Encoder hidden dimension
+        dropout: Dropout rate (default=0.1)
+    """
+
+    def __init__(
+        self,
+        encoder_backbone,
+        hidden_dim: int = 768,
+        dropout: float = 0.1
+    ):
+        super().__init__()
+
+        # DeBERTa Encoder backbone (将被全量微调)
+        self.encoder = encoder_backbone
+        self.tokenizer = encoder_backbone.tokenizer
+
+        # 获取 encoder 的 device 和 dtype
+        encoder_device = encoder_backbone.output_device
+        encoder_dtype = next(encoder_backbone.model.parameters()).dtype
+
+        # LayerNorm: 稳定 hidden state 的数值范围
+        self.layer_norm = nn.LayerNorm(hidden_dim)
+
+        # 单个回归头：预测 NTE 分数 [0, 1]
+        intermediate_dim = hidden_dim // 4  # 768 -> 192
+
+        self.regressor_head = nn.Sequential(
+            nn.Linear(hidden_dim, intermediate_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(intermediate_dim, 1),  # 输出单个分数
+            nn.Sigmoid()  # 约束到 [0, 1] 范围
+        )
+
+        # 将 LayerNorm 和回归头转换为与 encoder 相同的 dtype 和设备
+        self.layer_norm = self.layer_norm.to(dtype=encoder_dtype, device=encoder_device)
+        self.regressor_head.to(dtype=encoder_dtype, device=encoder_device)
+
+        self.hidden_dim = hidden_dim
+
+    def forward(
+        self,
+        texts: List[str]
+    ) -> torch.Tensor:
+        """前向传播
+
+        参数:
+            texts: 批次文本列表，每个文本包含问题和教师名称
+                   格式: "Question: [...]\n\nTeacher: [name]"
+
+        返回:
+            scores: [batch_size] - NTE分数预测
+        """
+        # 使用 encoder 的 encode() 方法，内部已实现 tokenization + mean pooling
+        pooled = self.encoder.encode(
+            texts,
+            pooling_mode="mean",
+            return_tensor=True
+        )  # [batch_size, hidden_dim]
+
+        # LayerNorm 稳定数值范围
+        pooled = self.layer_norm(pooled)
+
+        # 回归预测
+        scores = self.regressor_head(pooled).squeeze(-1)  # [batch_size]
+
+        return scores
 
 
 class RouterClassifier(nn.Module):
