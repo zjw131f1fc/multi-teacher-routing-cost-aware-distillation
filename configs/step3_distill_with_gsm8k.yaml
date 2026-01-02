@@ -36,7 +36,7 @@ dataset_settings:
     qa_settings:
       split:
         train: -1      # 不使用 GSM8K 的训练数据
-        test: 400    # 使用所有测试数据（1319 个）
+        test: 100    # 使用所有测试数据（1319 个）
 
 backbone_settings:
   type: "llm"

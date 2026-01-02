@@ -323,6 +323,9 @@ def _eval_qa(batch, device, info, student_model, tokenizer, max_seq_length):
     """QA 数据评估：生成答案并使用 judge 判定"""
     logger = getattr(info["config"], "logger", None)
 
+    # 导入 tqdm
+    from tqdm import tqdm
+
     # 获取 judge 函数
     dataset_bundle = info["models"].get("dataset_bundle")
     if dataset_bundle is None or dataset_bundle.get("judge") is None:
@@ -351,12 +354,12 @@ def _eval_qa(batch, device, info, student_model, tokenizer, max_seq_length):
             "total": 0
         }
 
-    # 生成答案
+    # 生成答案（分批处理以显示进度）
     student_model.eval()
-    generated_answers = []
 
+    # 构建所有输入
+    formatted_inputs = []
     for question in questions:
-        # 构建输入，添加 system prompt
         messages = [
             {"role": "system", "content": "You are a math expert. Please reason step by step, and put your final answer within \\boxed{}."},
             {"role": "user", "content": question}
@@ -366,16 +369,34 @@ def _eval_qa(batch, device, info, student_model, tokenizer, max_seq_length):
             tokenize=False,
             add_generation_prompt=True
         )
+        formatted_inputs.append(formatted_input)
 
-        # Tokenize
+    # 设置左填充（decoder-only 模型生成时需要）
+    original_padding_side = tokenizer.padding_side
+    tokenizer.padding_side = "left"
+
+    # 分批生成（每次生成固定数量以显示进度）
+    gen_batch_size = 4  # 每次生成 4 个样本
+    generated_answers = []
+
+    num_batches = (len(formatted_inputs) + gen_batch_size - 1) // gen_batch_size
+
+    for i in tqdm(range(0, len(formatted_inputs), gen_batch_size),
+                  desc="Generating answers",
+                  total=num_batches,
+                  leave=False):
+        batch_inputs = formatted_inputs[i:i + gen_batch_size]
+
+        # 批量 tokenize
         inputs = tokenizer(
-            formatted_input,
+            batch_inputs,
             return_tensors="pt",
+            padding=True,
             truncation=True,
             max_length=max_seq_length
         ).to(device)
 
-        # 生成
+        # 批量生成
         with torch.no_grad():
             outputs = student_model.generate(
                 **inputs,
@@ -388,21 +409,24 @@ def _eval_qa(batch, device, info, student_model, tokenizer, max_seq_length):
                 eos_token_id=tokenizer.eos_token_id
             )
 
-        # 解码
-        generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
+        # 解码当前批次
+        for output in outputs:
+            generated_text = tokenizer.decode(output, skip_special_tokens=True)
 
-        # 提取助手的回复（去掉用户输入部分）
-        if "assistant" in generated_text:
-            # 简单提取：找到 "assistant" 后的内容
-            parts = generated_text.split("assistant")
-            if len(parts) > 1:
-                answer = parts[-1].strip()
+            # 提取助手的回复（去掉用户输入部分）
+            if "assistant" in generated_text:
+                parts = generated_text.split("assistant")
+                if len(parts) > 1:
+                    answer = parts[-1].strip()
+                else:
+                    answer = generated_text
             else:
                 answer = generated_text
-        else:
-            answer = generated_text
 
-        generated_answers.append(answer)
+            generated_answers.append(answer)
+
+    # 恢复原始 padding side
+    tokenizer.padding_side = original_padding_side
 
     # 使用 judge 函数判定
     result = judge(generated_answers, reference_answers)
