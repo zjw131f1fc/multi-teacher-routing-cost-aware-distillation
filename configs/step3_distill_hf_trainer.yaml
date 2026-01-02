@@ -24,7 +24,7 @@ manager_settings:
   name: "basic"
   mode: "direct"
   num_subtasks: 1
-  available_gpus: [0]
+  available_gpus: [0,1,2]
   gpus_per_subtask: 1
   poll_interval: 5.0
 
@@ -35,7 +35,7 @@ dataset_settings:
     name: "distill-openr1-math"
     distill_settings:
       split:
-        train: 10000       # 使用 10k 训练数据
+        train: "all"       # 使用 10k 训练数据
         test: -1           # 不使用蒸馏数据集的测试集
   # 数据集 2: QA 测试数据（GSM8K）
   - type: "qa"
@@ -50,7 +50,7 @@ backbone_settings:
   name: "qwen2.5-0.5b-instruct"
   model_id: "Qwen/Qwen2.5-0.5B-Instruct"
   llm_settings:
-    device_map: "auto"
+    device_map: "balanced"
     attn_implementation: "flash_attention_2"
     torch_dtype: "bfloat16"
 
@@ -80,7 +80,7 @@ trainer_settings:
     # warmup_steps: 100          # 或者直接指定 warmup 步数
 
     # ==================== 梯度累积 ====================
-    gradient_accumulation_steps: 4  # 有效 batch size = batch_size * gradient_accumulation_steps = 8
+    gradient_accumulation_steps: 8  # 有效 batch size = 4 * 8 = 32
 
     # ==================== 混合精度训练 ====================
     fp16: false         # 使用 fp16 混合精度（适用于 V100 等老 GPU）
@@ -133,5 +133,5 @@ method_settings:
   best_teacher_name: "deepseek-r1"
   router_checkpoint: null
   distill_temperature: 1.0
-  max_seq_length: 2048
-  max_train_length: 8000  # 放宽长度限制，保留更多训练样本
+  max_seq_length: 10000
+  max_train_length: 9000  # 放宽长度限制，保留更多训练样本

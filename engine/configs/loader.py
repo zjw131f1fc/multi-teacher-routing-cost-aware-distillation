@@ -4,10 +4,24 @@ import sys
 # 自动检测工作目录：从当前文件位置向上找到项目根目录
 CURRENT_FILE_DIR = os.path.dirname(os.path.abspath(__file__))
 WORKSPACE_DIR = os.path.abspath(os.path.join(CURRENT_FILE_DIR, '../..'))
+
+# 加载 .env 文件
+from dotenv import load_dotenv
+dotenv_path = os.path.join(WORKSPACE_DIR, '.env')
+load_dotenv(dotenv_path)
+
+# 设置 HuggingFace 环境变量
 HF_HOME = "/data/users/zjw/huggingface_cache"
 HF_ENDPOINT = "https://hf-mirror.com"
+HF_TOKEN = os.getenv("HF_TOKEN")  # 从 .env 加载
+
 os.environ["HF_HOME"] = HF_HOME
 os.environ["HF_ENDPOINT"] = HF_ENDPOINT
+if HF_TOKEN:
+    os.environ["HF_TOKEN"] = HF_TOKEN
+    os.environ["HUGGING_FACE_HUB_TOKEN"] = HF_TOKEN  # 兼容不同的环境变量名
+
+# 注意：不设置 HF_DATASETS_OFFLINE=1，而是在 load_dataset 时使用 download_mode="reuse_cache_if_exists"
 sys.path.insert(0, WORKSPACE_DIR)
 import sys
 import logging

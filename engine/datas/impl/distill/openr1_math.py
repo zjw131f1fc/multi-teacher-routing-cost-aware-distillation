@@ -148,8 +148,22 @@ class OpenR1MathPreparer(BasePreparer):
         if logger:
             logger.info(f"[OpenR1Math] Loading from HuggingFace: {self.hf_path} (split={self.hf_split})")
 
-        # 加载 HuggingFace 数据集
-        dataset = load_dataset(self.hf_path, split=self.hf_split)
+        # 获取 HuggingFace cache 目录
+        hf_cache_dir = None
+        global_settings = getattr(self.config, "global_settings", None) or self.config.get("global_settings")
+        if global_settings:
+            if isinstance(global_settings, dict):
+                hf_cache_dir = global_settings.get("hf_cache_dir")
+            else:
+                hf_cache_dir = getattr(global_settings, "hf_cache_dir", None)
+
+        # 加载 HuggingFace 数据集（使用缓存目录，优先使用缓存）
+        dataset = load_dataset(
+            self.hf_path,
+            split=self.hf_split,
+            cache_dir=hf_cache_dir,  # 使用配置的缓存目录
+            download_mode="reuse_cache_if_exists"  # 优先使用缓存，避免不必要的下载
+        )
 
         # 转换为蒸馏格式
         samples = []
