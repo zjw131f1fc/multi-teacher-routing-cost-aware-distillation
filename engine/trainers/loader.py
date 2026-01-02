@@ -45,5 +45,11 @@ def load_trainer(config: Any, dataset_bundle: Dict[str, Any] = None):
 		from .impl.basic_tianshou import BasicTianshouTrainer
 		return BasicTianshouTrainer(config=config)
 
+	elif name == "hf-trainer":
+		from .impl.hf_trainer import HFTrainerWrapper
+		if dataset_bundle is None:
+			raise ValueError("HFTrainerWrapper 需要 dataset_bundle 参数")
+		return HFTrainerWrapper(config=config, dataset_bundle=dataset_bundle)
+
 	raise ValueError(f"不支持的训练器名称: {name}")
 

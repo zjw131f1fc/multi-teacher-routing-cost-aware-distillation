@@ -36,7 +36,7 @@ dataset_settings:
     qa_settings:
       split:
         train: -1      # 不使用 GSM8K 的训练数据
-        test: 100    # 使用所有测试数据（1319 个）
+        test: 200    # 使用所有测试数据（1319 个）
 
 backbone_settings:
   type: "llm"
@@ -53,8 +53,8 @@ trainer_settings:
   dl_settings:
     batch_size: 2
     epochs: 3
-    print_loss_every_batches: 50
-    eval_every_batches: 10
+    print_loss_every_batches: 100
+    eval_every_batches: 1000
     save_every_batches: 0
     save_every_epochs: 1
     eval_max_samples: 500
@@ -77,3 +77,4 @@ method_settings:
   router_checkpoint: null
   distill_temperature: 1.0
   max_seq_length: 2048
+  max_train_length: 2048  # 训练数据的最大长度，超过此长度的样本将被过滤

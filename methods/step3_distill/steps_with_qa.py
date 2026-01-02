@@ -378,6 +378,7 @@ def _eval_qa(batch, device, info, student_model, tokenizer, max_seq_length):
     # 分批生成（每次生成固定数量以显示进度）
     gen_batch_size = 4  # 每次生成 4 个样本
     generated_answers = []
+    truncated_count = 0  # 统计被截断的样本数
 
     num_batches = (len(formatted_inputs) + gen_batch_size - 1) // gen_batch_size
 
@@ -400,18 +401,28 @@ def _eval_qa(batch, device, info, student_model, tokenizer, max_seq_length):
         with torch.no_grad():
             outputs = student_model.generate(
                 **inputs,
-                max_new_tokens=512,
+                max_new_tokens=1024,  # 增加到1024以避免截断
                 do_sample=False,  # 贪婪解码
                 temperature=None,  # 消除警告
                 top_p=None,
                 top_k=None,
                 pad_token_id=tokenizer.pad_token_id,
-                eos_token_id=tokenizer.eos_token_id
+                eos_token_id=tokenizer.eos_token_id,
+                return_dict_in_generate=True,  # 返回详细信息
+                output_scores=False  # 不需要分数，只需要序列
             )
 
         # 解码当前批次
-        for output in outputs:
+        generated_sequences = outputs.sequences
+        for idx, output in enumerate(generated_sequences):
             generated_text = tokenizer.decode(output, skip_special_tokens=True)
+
+            # 检查是否被截断（生成的 token 数达到 max_new_tokens）
+            # output 包含 input + generated tokens
+            input_length = inputs.input_ids[idx].shape[0]
+            generated_length = output.shape[0] - input_length
+            if generated_length >= 1024:  # 达到 max_new_tokens 限制
+                truncated_count += 1
 
             # 提取助手的回复（去掉用户输入部分）
             if "assistant" in generated_text:
@@ -431,8 +442,13 @@ def _eval_qa(batch, device, info, student_model, tokenizer, max_seq_length):
     # 使用 judge 函数判定
     result = judge(generated_answers, reference_answers)
 
+    # 计算截断百分比
+    truncation_rate = truncated_count / len(generated_answers) if len(generated_answers) > 0 else 0.0
+
     return {
         "accuracy": result["accuracy"],
         "correct": result["correct"],
-        "total": result["total"]
+        "total": result["total"],
+        "truncation_rate": truncation_rate,
+        "truncated_count": truncated_count
     }

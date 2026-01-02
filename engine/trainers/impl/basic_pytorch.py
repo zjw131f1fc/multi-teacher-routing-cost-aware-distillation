@@ -409,6 +409,21 @@ class BasicPytorchTrainer:
         if self.logger:
             self.logger.info(f"开始训练: epochs={self.epochs}, steps/epoch={len(loader)}")
 
+        # 训练前评估 (step 0)
+        if self.eval_fn:
+            if self.logger:
+                self.logger.info("=" * 60)
+                self.logger.info("Step 0: 训练前评估")
+                self.logger.info("=" * 60)
+            max_samples = self.eval_max_samples if self.eval_max_samples > 0 else None
+            self.evaluate(max_samples=max_samples, trigger_info={
+                "epoch": 0,
+                "batch": 0,
+                "epoch_batch_index": 0,
+                "global_batch_index": 0,
+                "total_planned_batches": total_planned_batches
+            })
+
         for epoch in range(self.epochs):
             if self.logger:
                 self.logger.info(f"Epoch {epoch+1}/{self.epochs}")
@@ -645,6 +660,7 @@ class BasicPytorchTrainer:
         # 专门累积桶分布统计
         bucket_dist_accum = {}  # {teacher_name: {"predicted_counts": [...], "ground_truth_counts": [...]}}
         n = 0
+
         for i, batch in enumerate(tqdm(loader, desc="Evaluate")):
             info = {
                 "config": self.config,
@@ -691,11 +707,17 @@ class BasicPytorchTrainer:
                     agg[k] = v
             n += 1
 
-        # 标量指标求平均
+        # 标量指标处理：区分求和指标和求平均指标
+        # 求和指标：correct, total, truncated_count 等计数指标
+        sum_metrics = {'correct', 'total', 'truncated_count'}
+
         if n > 0:
             for k in list(agg.keys()):
                 if isinstance(agg[k], (int, float)):
-                    agg[k] /= n
+                    if k not in sum_metrics:
+                        # 求平均：accuracy, ce_loss, perplexity, truncation_rate 等
+                        agg[k] /= n
+                    # 求和指标保持不变（已经累加过了）
 
         # 计算桶分布的百分比并添加到结果中
         if bucket_dist_accum:

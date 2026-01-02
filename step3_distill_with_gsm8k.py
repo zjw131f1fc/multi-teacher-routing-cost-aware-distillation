@@ -222,6 +222,64 @@ def preload_fn(config: Dict) -> Dict[str, Any]:
 
     logger.info("数据准备完成!")
 
+    # ==================== 根据长度过滤训练数据 ====================
+    max_train_length = config["method_settings"].get("max_train_length", None)
+
+    if max_train_length is not None and max_train_length > 0:
+        logger.info(f"开始根据长度过滤训练数据（最大长度: {max_train_length}）...")
+
+        train_split = distill_bundle["splits"].get("train")
+        if train_split:
+            # 需要 tokenizer 来计算长度
+            # 暂时使用简单的文本长度估算（字符数）
+            # 后续可以改为使用真实的 tokenizer
+            original_count = len(train_split)
+            filtered_samples = []
+
+            for sample in train_split:
+                instruction = sample.get("instruction", "")
+                responses = sample.get("responses", {})
+
+                # 找到最短的教师响应长度（假设我们会选择其中一个）
+                min_response_length = float('inf')
+                has_valid_response = False
+
+                for teacher_name, teacher_data in responses.items():
+                    messages = teacher_data.get("messages", [])
+
+                    # 提取教师的响应文本
+                    teacher_response = ""
+                    for msg in messages:
+                        if msg.get("role") == "assistant":
+                            teacher_response = msg.get("content", "")
+                            break
+
+                    if teacher_response:
+                        has_valid_response = True
+                        # 构建完整的训练文本（instruction + response）
+                        # 估算 chat template 的开销约为 200 字符
+                        full_text = instruction + teacher_response
+                        # 粗略估算：1 token ≈ 1.5 个英文字符或 0.5 个中文字符
+                        # 保守估计：1 token ≈ 1 个字符
+                        estimated_length = len(full_text) + 200  # 加上 template 开销
+                        min_response_length = min(min_response_length, estimated_length)
+
+                # 只保留长度在限制内且有有效响应的样本
+                if has_valid_response and min_response_length <= max_train_length:
+                    filtered_samples.append(sample)
+
+            train_split.samples = filtered_samples
+            filtered_count = len(filtered_samples)
+
+            logger.info(
+                f"训练集长度过滤: {original_count} -> {filtered_count} "
+                f"(过滤掉 {original_count - filtered_count} 个超长样本)"
+            )
+        else:
+            logger.warning("训练集为空，跳过长度过滤")
+    else:
+        logger.info("未设置 max_train_length，跳过训练数据长度过滤")
+
     # ==================== 加载路由器（可选）====================
     router_checkpoint = config["method_settings"].get("router_checkpoint", None)
     router_model = None

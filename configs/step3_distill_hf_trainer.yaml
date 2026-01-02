@@ -1,0 +1,137 @@
+# Step3 蒸馏训练配置（使用 HuggingFace Trainer）
+#
+# 使用 HuggingFace Transformers Trainer 进行知识蒸馏训练
+# 相比 basic-pytorch trainer，HF Trainer 提供：
+# - 更成熟的训练管道（DeepSpeed、FSDP）
+# - 完善的分布式支持
+# - 丰富的回调和日志系统
+# - 自动混合精度、梯度累积等
+
+global_settings:
+  seed: 42
+  device: "cuda"
+  dtype: "bfloat16"
+  dataset_cache_dir: "/data/users/zjw/dataset_cache"
+  hf_cache_dir: "/data/users/zjw/huggingface_cache"
+  study_name: "step3_distill_hf_trainer"
+
+config_settings:
+  enable_dict_overrides: true
+  enable_yaml_overrides: true
+  log_config_on_load: true
+
+manager_settings:
+  name: "basic"
+  mode: "direct"
+  num_subtasks: 1
+  available_gpus: [0]
+  gpus_per_subtask: 1
+  poll_interval: 5.0
+
+# 多数据集配置
+dataset_settings:
+  # 数据集 1: 蒸馏训练数据（OpenR1-Math）
+  - type: "distill"
+    name: "distill-openr1-math"
+    distill_settings:
+      split:
+        train: 10000   # 使用 10k 训练数据
+        test: -1       # 不使用蒸馏数据集的测试集
+  # 数据集 2: QA 测试数据（GSM8K）
+  - type: "qa"
+    name: "qa-gsm8k"
+    qa_settings:
+      split:
+        train: -1      # 不使用 GSM8K 的训练数据
+        test: 200      # 使用 200 个测试样本
+
+backbone_settings:
+  type: "llm"
+  name: "qwen2.5-0.5b-instruct"
+  model_id: "Qwen/Qwen2.5-0.5B-Instruct"
+  llm_settings:
+    device_map: "auto"
+    attn_implementation: "flash_attention_2"
+    torch_dtype: "bfloat16"
+
+trainer_settings:
+  type: "dl"
+  name: "hf-trainer"  # 使用 HuggingFace Trainer
+
+  # 基本配置（仍然需要，用于兼容）
+  dl_settings:
+    batch_size: 2      # per_device_train_batch_size
+    epochs: 3
+
+  # HuggingFace TrainingArguments 配置
+  # 完整参数列表: https://huggingface.co/docs/transformers/main_classes/trainer#transformers.TrainingArguments
+  hf_settings:
+    # ==================== 优化器与学习率 ====================
+    learning_rate: 5.0e-5
+    weight_decay: 0.01
+    adam_beta1: 0.9
+    adam_beta2: 0.999
+    adam_epsilon: 1.0e-8
+    max_grad_norm: 1.0
+
+    # ==================== 学习率调度 ====================
+    lr_scheduler_type: "linear"  # linear, cosine, cosine_with_restarts, polynomial, constant, constant_with_warmup
+    warmup_ratio: 0.1            # warmup 占总步数的比例
+    # warmup_steps: 100          # 或者直接指定 warmup 步数
+
+    # ==================== 梯度累积 ====================
+    gradient_accumulation_steps: 4  # 有效 batch size = batch_size * gradient_accumulation_steps
+
+    # ==================== 混合精度训练 ====================
+    fp16: false         # 使用 fp16 混合精度（适用于 V100 等老 GPU）
+    bf16: true          # 使用 bf16 混合精度（适用于 A100/H100）
+    # fp16_opt_level: "O1"  # Apex AMP 优化级别
+
+    # ==================== 日志与监控 ====================
+    logging_dir: null              # 使用默认（output_dir/logs）
+    logging_steps: 50              # 每 50 步记录一次
+    logging_first_step: true       # 记录第一步
+    # report_to: "tensorboard"     # wandb, tensorboard, all, none
+
+    # ==================== 评估策略 ====================
+    evaluation_strategy: "steps"   # no, steps, epoch
+    eval_steps: 500                # 每 500 步评估一次
+    # eval_on_start: true          # 训练前先评估一次
+
+    # ==================== 保存策略 ====================
+    save_strategy: "steps"         # no, steps, epoch
+    save_steps: 500                # 每 500 步保存一次
+    save_total_limit: 3            # 最多保存 3 个 checkpoint
+    load_best_model_at_end: true   # 训练结束时加载最佳模型
+    metric_for_best_model: "eval_loss"  # 用于选择最佳模型的指标
+    greater_is_better: false       # eval_loss 越小越好
+
+    # ==================== 分布式训练（可选）====================
+    # deepspeed: "ds_config.json"  # DeepSpeed 配置文件路径
+    # fsdp: "full_shard"           # FSDP 策略: full_shard, shard_grad_op, no_shard
+    # fsdp_config: {...}           # FSDP 详细配置
+
+    # ==================== 其他高级选项 ====================
+    # gradient_checkpointing: true  # 启用梯度检查点（节省显存）
+    # auto_find_batch_size: true    # 自动寻找最大可用 batch size
+    # optim: "adamw_torch"          # 优化器: adamw_torch, adamw_hf, sgd, adafactor, adagrad
+    # group_by_length: true         # 按样本长度分组（减少 padding）
+    # length_column_name: "length"  # 样本长度字段名
+    # dataloader_num_workers: 4     # DataLoader 工作进程数
+    # dataloader_pin_memory: true   # 是否 pin memory
+
+    # ==================== 调试选项 ====================
+    # max_steps: 100               # 最大训练步数（调试用）
+    # resume_from_checkpoint: "path/to/checkpoint"  # 从检查点恢复
+    # ignore_data_skip: false      # 恢复时是否跳过已处理数据
+
+method_settings:
+  study_name: "step3_distill_hf_trainer"
+  required_teachers:
+    - "deepseek-r1"
+  routing_strategy: "best_teacher"
+  best_teacher_name: "deepseek-r1"
+  router_checkpoint: null
+  distill_temperature: 1.0
+  max_seq_length: 2048
+  max_train_length: 2048

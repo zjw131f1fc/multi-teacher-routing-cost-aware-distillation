@@ -112,13 +112,22 @@ class GSM8KPreparer(BasePreparer):
         math_verify 会验证数学答案的正确性，支持各种格式的数字表示。
         """
         try:
-            from math_verify import verify_math_answer
+            from math_verify.grader import verify as math_verify_verify
             use_math_verify = True
         except ImportError:
             use_math_verify = False
             logger = getattr(self.config, "logger", None)
             if logger:
                 logger.warning("[GSM8K] math_verify not installed, falling back to simple numeric comparison")
+
+        def extract_boxed_answer(text: str) -> str:
+            """从文本中提取 \\boxed{} 中的答案。如果没有找到，返回原文本。"""
+            import re
+            # 匹配 \boxed{...}
+            match = re.search(r'\\boxed\{([^}]+)\}', text)
+            if match:
+                return match.group(1)
+            return text
 
         def normalize_number(s: str) -> float:
             """提取并规范化数字（备用方案）。"""
@@ -158,8 +167,9 @@ class GSM8KPreparer(BasePreparer):
                 correct = 0
                 for p, r in zip(pred, ref):
                     if use_math_verify:
-                        # 使用 math_verify
-                        is_correct = verify_math_answer(str(p), str(r))
+                        # 提取 boxed 答案后使用 math_verify
+                        p_extracted = extract_boxed_answer(str(p))
+                        is_correct = math_verify_verify(p_extracted, str(r))
                     else:
                         # 备用：数值比较
                         p_num = normalize_number(str(p))
@@ -173,7 +183,8 @@ class GSM8KPreparer(BasePreparer):
 
             # 单条模式
             if use_math_verify:
-                is_correct = verify_math_answer(str(pred), str(ref))
+                p_extracted = extract_boxed_answer(str(pred))
+                is_correct = math_verify_verify(p_extracted, str(ref))
             else:
                 p_num = normalize_number(str(pred))
                 r_num = normalize_number(str(ref))
