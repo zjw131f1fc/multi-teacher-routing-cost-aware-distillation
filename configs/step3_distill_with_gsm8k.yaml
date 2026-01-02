@@ -21,19 +21,22 @@ manager_settings:
   gpus_per_subtask: 4
   poll_interval: 5.0
 
-# 混合数据集配置
+# 多数据集配置（使用新的列表模式）
 dataset_settings:
-  type: "distill"
-  name: "distill-mixed-qa"
-  distill_settings:
-    split:
-      train: 'all'   # 从蒸馏数据集（OpenR1-Math）加载的训练数据
-      test: -1       # 占位符（test 数据来自 GSM8K）
-    # GSM8K 测试数据配置
+  # 数据集 1: 蒸馏训练数据（OpenR1-Math）
+  - type: "distill"
+    name: "distill-openr1-math"
+    distill_settings:
+      split:
+        train: 'all'   # 使用所有训练数据
+        test: -1       # 不使用蒸馏数据集的测试集
+  # 数据集 2: QA 测试数据（GSM8K）
+  - type: "qa"
+    name: "qa-gsm8k"
     qa_settings:
       split:
-        train: -1    # 占位符，不使用 GSM8K 的训练数据
-        test: 'all'  # 使用 GSM8K 的全部测试数据（1319 个）
+        train: -1      # 不使用 GSM8K 的训练数据
+        test: 400    # 使用所有测试数据（1319 个）
 
 backbone_settings:
   type: "llm"
@@ -48,10 +51,10 @@ trainer_settings:
   type: "dl"
   name: "basic-pytorch"
   dl_settings:
-    batch_size: 4
+    batch_size: 2
     epochs: 3
     print_loss_every_batches: 50
-    eval_every_batches: 500
+    eval_every_batches: 10
     save_every_batches: 0
     save_every_epochs: 1
     eval_max_samples: 500
@@ -68,7 +71,7 @@ method_settings:
   study_name: "step3_distill_with_gsm8k"
   required_teachers:
     - "deepseek-r1"
-    - "qwen2.5-math-7b-instruct"
+    # - "qwen2.5-math-7b-instruct"
   routing_strategy: "best_teacher"
   best_teacher_name: "deepseek-r1"
   router_checkpoint: null

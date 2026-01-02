@@ -41,7 +41,7 @@
             注意：数据集路径等特定配置写死在各 Preparer 代码中。
 
 配置示例（分层结构，与 backbone/trainer 一致）:
-    # VQA 数据集
+    # 单数据集模式 - VQA 数据集
     dataset_settings:
       type: "vqa"
       name: "vqa-vqav2"
@@ -56,7 +56,7 @@
             - test: "mean"
         fast_load_no_random: true
 
-    # 蒸馏数据集
+    # 单数据集模式 - 蒸馏数据集
     dataset_settings:
       type: "distill"
       name: "distill-openr1-math"
@@ -65,7 +65,7 @@
           train: 10000
           test: 1000
 
-    # QA 数据集
+    # 单数据集模式 - QA 数据集
     dataset_settings:
       type: "qa"
       name: "qa-gsm8k"
@@ -73,6 +73,21 @@
         split:
           train: 7000
           test: 1319
+
+    # 多数据集模式（dataset_settings 为列表）
+    dataset_settings:
+      - type: "distill"
+        name: "distill-openr1-math"
+        distill_settings:
+          split:
+            train: 'all'
+            test: -1
+      - type: "qa"
+        name: "qa-gsm8k"
+        qa_settings:
+          split:
+            train: -1
+            test: 'all'
 
 扩展一个新数据集步骤:
     1. 在 `datas/base/<type>.py` 创建基类（如果类型不存在）。
@@ -137,12 +152,78 @@ DATASET_REGISTRY: Dict[str, Type[Any]] = {
 
 
 def load_dataset(config: Optional[dict] = None) -> Any:
-    """根据名称加载并实例化数据集，返回 bundle dict: {'splits':..., 'meta':..., 'judge': callable}。
+    """根据名称加载并实例化数据集。
+
+    支持两种模式:
+    1. 单数据集: dataset_settings 是 dict，返回单个 bundle
+       返回: {'splits':..., 'meta':..., 'judge': callable}
+
+    2. 多数据集: dataset_settings 是 list，返回多个 bundle 的列表
+       返回: [
+           {'splits':..., 'meta':..., 'judge': callable},
+           {'splits':..., 'meta':..., 'judge': callable},
+           ...
+       ]
 
     judge: 数据集相关答案判定函数，支持:
       - 单条: judge(pred_str, ref_str, sample) -> {correct,total,accuracy}
       - 批量: judge([pred...], [ref...]) -> {correct,total,accuracy}
     """
+    # 兼容 dict 和 SimpleNamespace
+    if isinstance(config, dict):
+        dataset_settings = config["dataset_settings"]
+    else:
+        dataset_settings = config.dataset_settings
+
+    # 检查是否为多数据集配置（列表）
+    if isinstance(dataset_settings, list):
+        # 多数据集模式：依次加载每个数据集
+        bundles = []
+        for idx, ds_config in enumerate(dataset_settings):
+            # 创建临时配置，只包含当前数据集的配置
+            temp_config = _create_temp_config(config, ds_config)
+
+            # 加载单个数据集
+            bundle = _load_single_dataset(temp_config)
+            bundles.append(bundle)
+
+        return bundles
+    else:
+        # 单数据集模式
+        return _load_single_dataset(config)
+
+
+def _create_temp_config(original_config, dataset_settings_item):
+    """创建临时配置，用于加载单个数据集。"""
+    from types import SimpleNamespace
+
+    if isinstance(original_config, dict):
+        # 深拷贝原始配置
+        import copy
+        temp_config = copy.deepcopy(original_config)
+        temp_config["dataset_settings"] = dataset_settings_item
+
+        # 转换为 SimpleNamespace 以兼容基类
+        def dict_to_namespace(d):
+            if isinstance(d, dict):
+                return SimpleNamespace(**{k: dict_to_namespace(v) for k, v in d.items()})
+            elif isinstance(d, list):
+                return [dict_to_namespace(item) for item in d]
+            else:
+                return d
+
+        temp_config = dict_to_namespace(temp_config)
+    else:
+        # SimpleNamespace
+        import copy
+        temp_config = copy.deepcopy(original_config)
+        temp_config.dataset_settings = dict_to_namespace(dataset_settings_item) if isinstance(dataset_settings_item, dict) else dataset_settings_item
+
+    return temp_config
+
+
+def _load_single_dataset(config):
+    """加载单个数据集，返回 bundle。"""
     # 兼容 dict 和 SimpleNamespace
     if isinstance(config, dict):
         name = config["dataset_settings"]["name"]
@@ -151,6 +232,7 @@ def load_dataset(config: Optional[dict] = None) -> Any:
 
     if name not in DATASET_REGISTRY:
         raise KeyError(f"Dataset '{name}' is not registered. 已注册: {list_datasets()}")
+
     dataset_cls = DATASET_REGISTRY[name]
     return dataset_cls(config=config).get()
 

@@ -1,7 +1,10 @@
-"""Step 3: 知识蒸馏（使用混合数据集：蒸馏训练 + GSM8K 测试）
+"""Step 3: 知识蒸馏（使用多数据集模式：蒸馏训练 + GSM8K 测试）
 
 使用训练好的路由器选择最优教师，蒸馏到学生模型（Qwen2.5-0.5B-Instruct）。
-训练数据来自蒸馏数据集（OpenR1-Math），测试数据来自 GSM8K。
+- 训练数据来自蒸馏数据集（OpenR1-Math）
+- 测试数据来自 QA 数据集（GSM8K）
+
+使用新的多数据集加载模式，dataset_settings 配置为列表，返回多个 bundle。
 
 使用方法:
     python step3_distill_with_gsm8k.py --config configs/step3_distill_with_gsm8k.yaml
@@ -28,8 +31,18 @@ def preload_fn(config: Dict) -> Dict[str, Any]:
     logger = config["logger"]
     logger.info("预加载数据集...")
 
-    # 加载混合数据集（蒸馏训练 + GSM8K 测试）
-    dataset_bundle = load_dataset(config)
+    # 使用新的多数据集加载模式
+    # 返回列表: [distill_bundle, qa_bundle]
+    dataset_bundles = load_dataset(config)
+
+    logger.info(f"加载了 {len(dataset_bundles)} 个数据集")
+
+    # 分离两个数据集
+    distill_bundle = dataset_bundles[0]  # 蒸馏数据集（OpenR1-Math）
+    qa_bundle = dataset_bundles[1]       # QA 数据集（GSM8K）
+
+    logger.info(f"蒸馏数据集: {distill_bundle['meta'].get('dataset_name', 'N/A')}")
+    logger.info(f"QA 数据集: {qa_bundle['meta'].get('dataset_name', 'N/A')}")
 
     # 根据数据集名称加载文件
     dataset_name = "distill-openr1-math"  # 使用 OpenR1-Math 的缓存
@@ -56,8 +69,8 @@ def preload_fn(config: Dict) -> Dict[str, Any]:
 
         logger.info(f"建立了 {len(supplement_index)} 条补充数据索引")
 
-        # 合并数据：只对训练集进行合并（测试集来自 GSM8K，不需要补充）
-        train_split = dataset_bundle["splits"].get("train")
+        # 合并数据：只对蒸馏数据集的训练集进行合并
+        train_split = distill_bundle["splits"].get("train")
         if train_split:
             merged_count = 0
             for i in range(len(train_split)):
@@ -82,76 +95,130 @@ def preload_fn(config: Dict) -> Dict[str, Any]:
     else:
         logger.warning(f"补充数据文件不存在: {supplement_file}")
 
-    # ==================== 加载 NTE 分数 ====================
-    logger.info(f"加载 NTE 分数: {score_file}")
+    # ==================== 检查是否需要 NTE 分数 ====================
+    # 定义需要 NTE 分数的路由策略
+    routing_strategy = config["method_settings"].get("routing_strategy", "random")
 
-    if not os.path.exists(score_file):
-        raise FileNotFoundError(
-            f"NTE 分数文件不存在: {score_file}\n"
-            f"请先运行 step1_collect_scores.py 收集分数"
-        )
+    # 需要 NTE 分数的策略列表
+    # - nte_best: 根据 NTE 分数选择最佳教师
+    # - nte_weighted: 根据 NTE 分数加权采样教师
+    # - knn_stats: 基于 KNN 和统计信息的路由（需要历史分数）
+    strategies_need_scores = ["nte_best", "nte_weighted", "knn_stats"]
 
-    with open(score_file, 'r', encoding='utf-8') as f:
-        student_scores = json.load(f)
+    # 不需要 NTE 分数的策略：
+    # - best_teacher: 直接使用配置指定的最佳教师
+    # - random: 随机选择教师
+    # - round_robin: 轮流选择教师
+    # 如需添加新策略，请更新上述 strategies_need_scores 列表
 
-    logger.info(f"加载了 {len(student_scores)} 条 NTE 分数")
+    need_nte_scores = routing_strategy in strategies_need_scores
+    logger.info(f"路由策略: {routing_strategy}")
+    logger.info(f"是否需要 NTE 分数: {need_nte_scores}")
 
-    # 合并 NTE 分数到训练集
-    score_index = {}
-    for item in student_scores:
-        instruction = item.get("instruction", "")
-        if instruction:
-            score_index[instruction] = item.get("teacher_scores", {})
+    if need_nte_scores:
+        # ==================== 加载 NTE 分数 ====================
+        logger.info(f"加载 NTE 分数: {score_file}")
 
-    logger.info(f"建立了 {len(score_index)} 条分数索引")
-
-    # 只对训练集合并分数
-    train_split = dataset_bundle["splits"].get("train")
-    if train_split:
-        merged_count = 0
-        for i in range(len(train_split)):
-            sample = train_split[i]
-            instruction = sample.get("instruction", "")
-
-            if instruction in score_index:
-                teacher_scores = score_index[instruction]
-
-                # 为每个教师添加 NTE 分数
-                for teacher_name, scores_dict in teacher_scores.items():
-                    if teacher_name in sample.get("responses", {}):
-                        sample["responses"][teacher_name]["nte_scores"] = scores_dict
-                        merged_count += 1
-
-        logger.info(f"训练集: 合并了 {merged_count} 条 NTE 分数")
-
-    # 过滤训练集：只保留包含所有必需教师且有 NTE 分数的样本
-    required_teachers = config["method_settings"].get("required_teachers", None)
-
-    if required_teachers and train_split:
-        logger.info(f"过滤训练集: 要求包含所有教师的 NTE 分数 {required_teachers}")
-
-        original_count = len(train_split)
-
-        filtered_samples = []
-        for sample in train_split:
-            responses = sample.get("responses", {})
-
-            # 检查是否包含所有教师且都有 NTE 分数
-            has_all_scores = all(
-                teacher_name in responses and "nte_scores" in responses[teacher_name]
-                for teacher_name in required_teachers
+        if not os.path.exists(score_file):
+            raise FileNotFoundError(
+                f"NTE 分数文件不存在: {score_file}\n"
+                f"请先运行 step1_collect_scores.py 收集分数"
             )
 
-            if has_all_scores:
-                filtered_samples.append(sample)
+        with open(score_file, 'r', encoding='utf-8') as f:
+            student_scores = json.load(f)
 
-        train_split.samples = filtered_samples
-        filtered_count = len(filtered_samples)
+        logger.info(f"加载了 {len(student_scores)} 条 NTE 分数")
 
-        logger.info(
-            f"训练集: {original_count} -> {filtered_count} "
-            f"(过滤掉 {original_count - filtered_count} 个样本)"
-        )
+        # 合并 NTE 分数到训练集
+        score_index = {}
+        for item in student_scores:
+            instruction = item.get("instruction", "")
+            if instruction:
+                score_index[instruction] = item.get("teacher_scores", {})
+
+        logger.info(f"建立了 {len(score_index)} 条分数索引")
+
+        # 只对蒸馏数据集的训练集合并分数
+        train_split = distill_bundle["splits"].get("train")
+        if train_split:
+            merged_count = 0
+            for i in range(len(train_split)):
+                sample = train_split[i]
+                instruction = sample.get("instruction", "")
+
+                if instruction in score_index:
+                    teacher_scores = score_index[instruction]
+
+                    # 为每个教师添加 NTE 分数
+                    for teacher_name, scores_dict in teacher_scores.items():
+                        if teacher_name in sample.get("responses", {}):
+                            sample["responses"][teacher_name]["nte_scores"] = scores_dict
+                            merged_count += 1
+
+            logger.info(f"训练集: 合并了 {merged_count} 条 NTE 分数")
+
+        # 过滤训练集：只保留包含所有必需教师且有 NTE 分数的样本
+        required_teachers = config["method_settings"].get("required_teachers", None)
+
+        if required_teachers and train_split:
+            logger.info(f"过滤训练集: 要求包含所有教师的 NTE 分数 {required_teachers}")
+
+            original_count = len(train_split)
+
+            filtered_samples = []
+            for sample in train_split:
+                responses = sample.get("responses", {})
+
+                # 检查是否包含所有教师且都有 NTE 分数
+                has_all_scores = all(
+                    teacher_name in responses and "nte_scores" in responses[teacher_name]
+                    for teacher_name in required_teachers
+                )
+
+                if has_all_scores:
+                    filtered_samples.append(sample)
+
+            train_split.samples = filtered_samples
+            filtered_count = len(filtered_samples)
+
+            logger.info(
+                f"训练集: {original_count} -> {filtered_count} "
+                f"(过滤掉 {original_count - filtered_count} 个样本)"
+            )
+    else:
+        # ==================== 不需要 NTE 分数的路由策略 ====================
+        logger.info("当前路由策略不需要 NTE 分数，跳过加载和过滤")
+
+        # 但仍然需要过滤训练集：保留包含所有必需教师响应的样本
+        required_teachers = config["method_settings"].get("required_teachers", None)
+        train_split = distill_bundle["splits"].get("train")
+
+        if required_teachers and train_split:
+            logger.info(f"过滤训练集: 要求包含所有教师的响应 {required_teachers}")
+
+            original_count = len(train_split)
+
+            filtered_samples = []
+            for sample in train_split:
+                responses = sample.get("responses", {})
+
+                # 检查是否包含所有教师的响应
+                has_all_teachers = all(
+                    teacher_name in responses
+                    for teacher_name in required_teachers
+                )
+
+                if has_all_teachers:
+                    filtered_samples.append(sample)
+
+            train_split.samples = filtered_samples
+            filtered_count = len(filtered_samples)
+
+            logger.info(
+                f"训练集: {original_count} -> {filtered_count} "
+                f"(过滤掉 {original_count - filtered_count} 个样本)"
+            )
 
     logger.info("数据准备完成!")
 
@@ -170,21 +237,16 @@ def preload_fn(config: Dict) -> Dict[str, Any]:
     # ==================== 手动划分训练集和验证集 ====================
     logger.info("手动划分训练集和验证集...")
 
-    train_split = dataset_bundle["splits"]["train"]
+    train_split = distill_bundle["splits"]["train"]
     train_samples = train_split.samples
 
     # 划分比例: 80% train, 20% val
     total = len(train_samples)
     train_size = int(total * 0.8)
 
-    # 随机打乱并划分
-    import random
-    random.seed(config["global_settings"]["seed"])
-    shuffled_samples = train_samples.copy()
-    random.shuffle(shuffled_samples)
-
-    train_data = shuffled_samples[:train_size]
-    val_data = shuffled_samples[train_size:]
+    # 按顺序划分（不打乱）
+    train_data = train_samples[:train_size]
+    val_data = train_samples[train_size:]
 
     logger.info(f"原始训练数据: {total} 样本")
     logger.info(f"划分后 - 训练集: {len(train_data)} 样本")
@@ -192,11 +254,28 @@ def preload_fn(config: Dict) -> Dict[str, Any]:
 
     # 重新打包为 dataset
     from engine.datas.base.distill import DistillDataset
-    dataset_bundle["splits"]["train"] = DistillDataset(train_data)
-    dataset_bundle["splits"]["val"] = DistillDataset(val_data)
+    distill_bundle["splits"]["train"] = DistillDataset(train_data)
+    distill_bundle["splits"]["val"] = DistillDataset(val_data)
+
+    # 合并两个数据集的 splits：训练集来自蒸馏，测试集来自 QA
+    merged_bundle = {
+        "splits": {
+            "train": distill_bundle["splits"]["train"],
+            "test": qa_bundle["splits"]["test"]
+        },
+        "meta": {
+            "train_source": distill_bundle["meta"],
+            "test_source": qa_bundle["meta"]
+        },
+        "judge": qa_bundle.get("judge")  # 使用 QA 的 judge 函数
+    }
+
+    logger.info("数据集合并完成:")
+    logger.info(f"  训练集: {len(merged_bundle['splits']['train'])} 样本（来自蒸馏数据集）")
+    logger.info(f"  测试集: {len(merged_bundle['splits']['test'])} 样本（来自 GSM8K）")
 
     return {
-        "dataset_bundle": dataset_bundle,
+        "dataset_bundle": merged_bundle,
         "router_model": router_model
     }
 
@@ -204,7 +283,13 @@ def preload_fn(config: Dict) -> Dict[str, Any]:
 # ==================== 训练函数 ====================
 
 def run_fn(config: Dict, cache: Dict[str, Any]) -> Dict[str, Any]:
-    """执行蒸馏训练"""
+    """执行蒸馏训练
+
+    使用 preload_fn 中合并好的 dataset_bundle:
+    - splits["train"]: 来自蒸馏数据集（OpenR1-Math）
+    - splits["test"]: 来自 QA 数据集（GSM8K）
+    - judge: 来自 QA 数据集（用于测试集评估）
+    """
     logger = config["logger"]
     dataset_bundle = cache["dataset_bundle"]
     router_model = cache.get("router_model", None)
@@ -225,23 +310,13 @@ def run_fn(config: Dict, cache: Dict[str, Any]) -> Dict[str, Any]:
 
     logger.info(f"学生模型参数量: {sum(p.numel() for p in student_model.parameters()) / 1e9:.2f}B")
 
-    # 重新组织数据集: 使用 val 作为内部评估，test (GSM8K) 作为最终评估
-    logger.info("重新组织数据集...")
-    reorganized_bundle = {
-        "splits": {
-            "train": dataset_bundle["splits"]["train"],
-            "test": dataset_bundle["splits"]["test"]  # GSM8K 测试集
-        },
-        "meta": dataset_bundle["meta"],
-        "judge": dataset_bundle.get("judge")
-    }
-
-    logger.info(f"训练集大小: {len(reorganized_bundle['splits']['train'])}")
-    logger.info(f"测试集大小 (GSM8K): {len(reorganized_bundle['splits']['test'])}")
+    # 数据集已在 preload_fn 中完成合并和组织
+    logger.info(f"训练集大小: {len(dataset_bundle['splits']['train'])}")
+    logger.info(f"测试集大小 (GSM8K): {len(dataset_bundle['splits']['test'])}")
 
     # 创建 Trainer
     logger.info("创建 Trainer...")
-    trainer = load_trainer(config, reorganized_bundle)
+    trainer = load_trainer(config, dataset_bundle)
 
     # 注册模型
     trainer.register_model("student", student_model)
@@ -252,7 +327,7 @@ def run_fn(config: Dict, cache: Dict[str, Any]) -> Dict[str, Any]:
     trainer.register_model("tokenizer", tokenizer)
     trainer.register_model("required_teachers", required_teachers)
     trainer.register_model("router_model", router_model)
-    trainer.register_model("dataset_bundle", reorganized_bundle)  # 传递 judge 函数
+    trainer.register_model("dataset_bundle", dataset_bundle)  # 传递 judge 函数
 
     # 注册KNN和统计信息（可选，用于knn_stats策略）
     trainer.register_model("knn_index", None)

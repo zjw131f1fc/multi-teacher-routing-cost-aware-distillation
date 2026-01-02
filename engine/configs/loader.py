@@ -322,10 +322,15 @@ def _generate_experiment_tag(config: Dict[str, Any]) -> str:
     """
     # 1. 时间戳（年月日-时分）- 放在最前方便排序
     timestamp = datetime.now().strftime('%Y%m%d-%H%M')
-    
+
     # 2. 数据集名称（简化）
-    dataset_name = config["dataset_settings"]["name"].lower().replace(" ", "-")
-    
+    # 支持多数据集：如果 dataset_settings 是列表，使用第一个数据集的名称
+    dataset_settings = config["dataset_settings"]
+    if isinstance(dataset_settings, list):
+        dataset_name = dataset_settings[0]["name"].lower().replace(" ", "-")
+    else:
+        dataset_name = dataset_settings["name"].lower().replace(" ", "-")
+
     # 3. Backbone名称（简化，移除点和连字符）
     backbone_name = config["backbone_settings"]["name"].lower()
     backbone_short = backbone_name.replace(".", "").replace("-", "")

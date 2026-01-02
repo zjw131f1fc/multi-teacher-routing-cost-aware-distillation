@@ -92,6 +92,9 @@ def train_step(batch: Dict[str, Any], device: str, info: Dict[str, Any]) -> Dict
         if not teacher_response:
             continue
 
+        # 去掉 <cot> 和 </cot> 标签（学生模型不是推理模型）
+        teacher_response = teacher_response.replace("<cot>", "").replace("</cot>", "")
+
         # 构建输入和目标
         # 输入: instruction
         # 目标: teacher_response
@@ -111,10 +114,11 @@ def train_step(batch: Dict[str, Any], device: str, info: Dict[str, Any]) -> Dict
         }
 
     # Tokenize（使用 chat template）
-    # 构建对话格式
+    # 构建对话格式，添加 system prompt 引导模型输出格式
     formatted_inputs = []
     for inp, tgt in zip(input_texts, target_texts):
         messages = [
+            {"role": "system", "content": "You are a math expert. Please reason step by step, and put your final answer within \\boxed{}."},
             {"role": "user", "content": inp},
             {"role": "assistant", "content": tgt}
         ]
@@ -186,12 +190,12 @@ def eval_step(batch: Dict[str, Any], device: str, info: Dict[str, Any]) -> Dict[
     # 从配置中获取参数
     max_seq_length = config["method_settings"].get("max_seq_length", 2048)
 
-    # 检查是否是 QA 数据（有 metadata.final_answer）
+    # 检查是否是 QA 数据（有 final_answer 字段）
     is_qa_data = False
     if len(batch) > 0:
         first_sample = batch[0]
-        metadata = first_sample.get("metadata", {})
-        is_qa_data = "final_answer" in metadata
+        # QA 数据直接有 final_answer 字段（不在 metadata 中）
+        is_qa_data = "final_answer" in first_sample
 
     if is_qa_data:
         # QA 评估：生成答案并使用 judge 判定
@@ -253,6 +257,11 @@ def _eval_distill(batch, device, info, student_model, tokenizer, max_seq_length)
         if not teacher_response:
             continue
 
+        # 去掉常见的特殊标签（学生模型不是推理模型）
+        teacher_response = teacher_response.replace("<think>", "").replace("</think>", "")
+        teacher_response = teacher_response.replace("<cot>", "").replace("</cot>", "")
+        teacher_response = teacher_response.replace("<thinking>", "").replace("</thinking>", "")
+
         # 构建输入和目标
         input_texts.append(instruction)
         target_texts.append(teacher_response)
@@ -264,9 +273,11 @@ def _eval_distill(batch, device, info, student_model, tokenizer, max_seq_length)
         }
 
     # Tokenize（使用 chat template）
+    # 添加 system prompt 引导模型输出格式
     formatted_inputs = []
     for inp, tgt in zip(input_texts, target_texts):
         messages = [
+            {"role": "system", "content": "You are a math expert. Please reason step by step, and put your final answer within \\boxed{}."},
             {"role": "user", "content": inp},
             {"role": "assistant", "content": tgt}
         ]
@@ -313,7 +324,7 @@ def _eval_qa(batch, device, info, student_model, tokenizer, max_seq_length):
     logger = getattr(info["config"], "logger", None)
 
     # 获取 judge 函数
-    dataset_bundle = info.get("dataset_bundle")
+    dataset_bundle = info["models"].get("dataset_bundle")
     if dataset_bundle is None or dataset_bundle.get("judge") is None:
         if logger:
             logger.warning("[Eval] No judge function found, falling back to distill eval")
@@ -326,11 +337,11 @@ def _eval_qa(batch, device, info, student_model, tokenizer, max_seq_length):
     reference_answers = []
 
     for sample in batch:
-        instruction = sample["instruction"]
-        metadata = sample.get("metadata", {})
-        final_answer = metadata.get("final_answer", "")
+        # QA 数据使用 question 和 final_answer 字段
+        question = sample["question"]
+        final_answer = sample.get("final_answer", "")
 
-        questions.append(instruction)
+        questions.append(question)
         reference_answers.append(final_answer)
 
     if len(questions) == 0:
@@ -345,8 +356,11 @@ def _eval_qa(batch, device, info, student_model, tokenizer, max_seq_length):
     generated_answers = []
 
     for question in questions:
-        # 构建输入
-        messages = [{"role": "user", "content": question}]
+        # 构建输入，添加 system prompt
+        messages = [
+            {"role": "system", "content": "You are a math expert. Please reason step by step, and put your final answer within \\boxed{}."},
+            {"role": "user", "content": question}
+        ]
         formatted_input = tokenizer.apply_chat_template(
             messages,
             tokenize=False,
@@ -367,6 +381,9 @@ def _eval_qa(batch, device, info, student_model, tokenizer, max_seq_length):
                 **inputs,
                 max_new_tokens=512,
                 do_sample=False,  # 贪婪解码
+                temperature=None,  # 消除警告
+                top_p=None,
+                top_k=None,
                 pad_token_id=tokenizer.pad_token_id,
                 eos_token_id=tokenizer.eos_token_id
             )
