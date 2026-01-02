@@ -35,15 +35,15 @@ dataset_settings:
     name: "distill-openr1-math"
     distill_settings:
       split:
-        train: 10000   # 使用 10k 训练数据
-        test: -1       # 不使用蒸馏数据集的测试集
+        train: 10000       # 使用 10k 训练数据
+        test: -1           # 不使用蒸馏数据集的测试集
   # 数据集 2: QA 测试数据（GSM8K）
   - type: "qa"
     name: "qa-gsm8k"
     qa_settings:
       split:
-        train: -1      # 不使用 GSM8K 的训练数据
-        test: 200      # 使用 200 个测试样本
+        train: -1          # 不使用 GSM8K 的训练数据
+        test: 400          # 使用 400 条测试数据（加快评估）
 
 backbone_settings:
   type: "llm"
@@ -60,7 +60,7 @@ trainer_settings:
 
   # 基本配置（仍然需要，用于兼容）
   dl_settings:
-    batch_size: 2      # per_device_train_batch_size
+    batch_size: 2          # per_device_train_batch_size
     epochs: 3
 
   # HuggingFace TrainingArguments 配置
@@ -80,7 +80,7 @@ trainer_settings:
     # warmup_steps: 100          # 或者直接指定 warmup 步数
 
     # ==================== 梯度累积 ====================
-    gradient_accumulation_steps: 4  # 有效 batch size = batch_size * gradient_accumulation_steps
+    gradient_accumulation_steps: 4  # 有效 batch size = batch_size * gradient_accumulation_steps = 8
 
     # ==================== 混合精度训练 ====================
     fp16: false         # 使用 fp16 混合精度（适用于 V100 等老 GPU）
@@ -94,7 +94,7 @@ trainer_settings:
     # report_to: "tensorboard"     # wandb, tensorboard, all, none
 
     # ==================== 评估策略 ====================
-    evaluation_strategy: "steps"   # no, steps, epoch
+    eval_strategy: "steps"         # no, steps, epoch (注意：是 eval_strategy 不是 evaluation_strategy)
     eval_steps: 500                # 每 500 步评估一次
     # eval_on_start: true          # 训练前先评估一次
 
@@ -103,8 +103,8 @@ trainer_settings:
     save_steps: 500                # 每 500 步保存一次
     save_total_limit: 3            # 最多保存 3 个 checkpoint
     load_best_model_at_end: true   # 训练结束时加载最佳模型
-    metric_for_best_model: "eval_loss"  # 用于选择最佳模型的指标
-    greater_is_better: false       # eval_loss 越小越好
+    metric_for_best_model: "eval_accuracy"  # 用 eval_accuracy 而不是 eval_loss
+    greater_is_better: true        # eval_accuracy 越大越好
 
     # ==================== 分布式训练（可选）====================
     # deepspeed: "ds_config.json"  # DeepSpeed 配置文件路径
@@ -134,4 +134,4 @@ method_settings:
   router_checkpoint: null
   distill_temperature: 1.0
   max_seq_length: 2048
-  max_train_length: 2048
+  max_train_length: 8000  # 放宽长度限制，保留更多训练样本
