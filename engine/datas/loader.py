@@ -3,12 +3,13 @@
 当前支持的数据集类型:
     - VQA (Visual Question Answering): MME, VQAv2, POPE, MMBench, ScienceQA, GQA, SEED-Bench
     - Distill (蒸馏训练): OpenR1-Math
+    - QA (Question Answering): GSM8K
 
 配置关键字段 (Config.dataset_settings):
     type: str
-        数据集类型，例如 'vqa' 或 'distill'。
+        数据集类型，例如 'vqa', 'distill', 或 'qa'。
     name: str
-        注册表中的数据集键，格式: 'type-name'，例如 'vqa-mme' 或 'distill-openr1-math'。
+        注册表中的数据集键，格式: 'type-name'，例如 'vqa-mme', 'distill-openr1-math', 或 'qa-gsm8k'。
     <type>_settings: Dict
         特定类型的配置。
 
@@ -32,6 +33,12 @@
         蒸馏数据集 ('distill_settings') 包含：
             split: Dict[str, float|int]
                 目标 split 及其大小（支持 float/int/-1/'all'）。
+
+        QA 数据集 ('qa_settings') 包含：
+            split: Dict[str, float|int]
+                目标 split 及其大小（支持 float/int/-1/'all'）。
+
+            注意：数据集路径等特定配置写死在各 Preparer 代码中。
 
 配置示例（分层结构，与 backbone/trainer 一致）:
     # VQA 数据集
@@ -57,6 +64,15 @@
         split:
           train: 10000
           test: 1000
+
+    # QA 数据集
+    dataset_settings:
+      type: "qa"
+      name: "qa-gsm8k"
+      qa_settings:
+        split:
+          train: 7000
+          test: 1319
 
 扩展一个新数据集步骤:
     1. 在 `datas/base/<type>.py` 创建基类（如果类型不存在）。
@@ -85,6 +101,12 @@ from .impl.vqa import (
 # Distill datasets
 from .impl.distill import (
     OpenR1MathPreparer,
+    MixedQAPreparer,
+)
+
+# QA datasets
+from .impl.qa import (
+    GSM8KPreparer,
 )
 
 # Registry: 所有支持的数据集
@@ -101,10 +123,15 @@ DATASET_REGISTRY: Dict[str, Type[Any]] = {
 
     # Distill datasets
     "distill-openr1-math": OpenR1MathPreparer,
+    "distill-mixed-qa": MixedQAPreparer,  # 蒸馏训练数据 + GSM8K 测试数据
+
+    # QA datasets
+    "qa-gsm8k": GSM8KPreparer,
 
     # 未来可以添加其他类型:
     # "captioning-coco": COCOCaptionPreparer,
     # "detection-coco": COCODetectionPreparer,
+    # "qa-math": MATHPreparer,
     # etc.
 }
 

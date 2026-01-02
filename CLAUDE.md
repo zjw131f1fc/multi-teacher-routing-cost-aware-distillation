@@ -88,6 +88,7 @@ engine/datas/
 ├── base/                    # 基类（按数据集类型）
 │   ├── vqa.py              # VQA基类: BasePreparer, BsesDataset
 │   ├── distill.py          # 蒸馏基类: BasePreparer, DistillDataset
+│   ├── qa.py               # QA基类: BasePreparer, QADataset
 │   └── __init__.py
 ├── impl/                    # 实现（按数据集类型）
 │   ├── vqa/                # VQA数据集实现
@@ -101,6 +102,9 @@ engine/datas/
 │   │   └── __init__.py
 │   ├── distill/            # 蒸馏数据集实现
 │   │   ├── openr1_math.py
+│   │   └── __init__.py
+│   ├── qa/                 # QA数据集实现
+│   │   ├── gsm8k.py
 │   │   └── __init__.py
 │   └── __init__.py
 ├── loader.py               # 注册表和加载器
@@ -134,14 +138,24 @@ dataset_settings:
       test: 1000
     hf_path: "open-r1/OpenR1-Math-220k"  # HuggingFace 数据集路径（可选）
     hf_split: "train"                     # HuggingFace split（可选）
+
+# QA 数据集
+dataset_settings:
+  type: "qa"               # 数据集类型
+  name: "qa-gsm8k"         # 具体数据集
+  qa_settings:             # QA特定配置
+    split:
+      train: 7000
+      test: 1319
+    # 注意：数据集路径等特定配置写死在各 Preparer 代码中
 ```
 
 ### 对比 Backbone/Trainer 结构
 ```
 Backbone:                Trainer:                 Data:
-├── type: "mllm"        ├── type: "dl"          ├── type: "vqa" / "distill"
-├── name: "llava"       ├── name: "pytorch"     ├── name: "vqa-mme" / "distill-openr1-math"
-└── mllm_settings:      └── dl_settings:        └── vqa_settings / distill_settings:
+├── type: "mllm"        ├── type: "dl"          ├── type: "vqa" / "distill" / "qa"
+├── name: "llava"       ├── name: "pytorch"     ├── name: "vqa-mme" / "distill-openr1-math" / "qa-gsm8k"
+└── mllm_settings:      └── dl_settings:        └── vqa_settings / distill_settings / qa_settings:
     └── device_map          └── batch_size          └── split
 ```
 
@@ -162,6 +176,11 @@ BasePreparer (base/vqa.py)
 BasePreparer (base/distill.py)
   └── Distill实现 (impl/distill/)
       └── OpenR1MathPreparer
+
+# QA 数据集
+BasePreparer (base/qa.py)
+  └── QA实现 (impl/qa/)
+      └── GSM8KPreparer
 ```
 
 ### 核心功能
@@ -193,6 +212,19 @@ BasePreparer (base/distill.py)
 3. **数据拆分**: 支持比例/绝对数量/占位符(-1)/全量('all')
 4. **注册机制**: `DATASET_REGISTRY` 按类型组织，格式 `"type-name"`
 5. **向后兼容**: 自动兼容旧的扁平配置结构
+
+#### QA 数据集
+1. **统一结构**: `{question, answer, final_answer, source_split}` + 答案提取
+2. **智能拆分**:
+   - 支持比例/绝对数量/占位符(-1)/全量('all')
+   - 自动从原始 split (train/test) 中合并和重新分配
+3. **答案提取**:
+   - GSM8K 格式: `#### answer`
+   - MATH 格式: `\boxed{answer}`
+   - 可扩展其他格式
+4. **Judge函数**: 使用 math_verify 或数值比较，返回 `{correct, total, accuracy}`
+   - 支持单条判定和批量判定
+   - 容错处理（逗号、美元符号、小数点等）
 
 ### 扩展新数据集
 
@@ -302,6 +334,74 @@ dataset_settings:
     split:
       train: 10000
       test: 1000
+```
+
+#### QA 数据集示例
+1. **在对应类型目录创建实现**:
+```python
+# engine/datas/impl/qa/my_qa.py
+from ...base.qa import BasePreparer, QADataset
+
+class MyQAPreparer(BasePreparer):
+    def _load_all(self):
+        # 从 HuggingFace 或其他源加载
+        dataset = load_dataset("my-org/my-dataset")
+        samples = []
+        for item in dataset["train"]:
+            sample = {
+                "question": item["question"],
+                "answer": item["answer"],
+                "final_answer": self.extract_answer(item["answer"], format_type="gsm8k"),
+                "source_split": "train",
+            }
+            samples.append(sample)
+        return samples
+
+    def get(self):
+        samples = self._load_all()
+        splits, placeholder = self.split_samples(samples)
+        meta = self.build_meta(samples, splits, placeholder)
+        judge = self._build_judge(meta, splits)
+        self.base_report(meta)
+        return {"splits": splits, "meta": meta, "judge": judge}
+
+    def _build_judge(self, meta, splits):
+        # 使用 math_verify 或自定义判定逻辑
+        from math_verify import verify_math_answer
+        def judge(pred, ref, sample=None):
+            # 判定逻辑
+            ...
+        return judge
+```
+
+2. **在类型目录__init__.py导出**:
+```python
+# engine/datas/impl/qa/__init__.py
+from .my_qa import MyQAPreparer  # noqa: F401
+```
+
+3. **在loader.py注册**:
+```python
+# engine/datas/loader.py
+from .impl.qa import MyQAPreparer
+
+DATASET_REGISTRY = {
+    "qa-mydataset": MyQAPreparer,  # 格式: "type-name"
+    ...
+}
+```
+
+4. **配置文件使用分层结构**:
+```yaml
+dataset_settings:
+  type: "qa"
+  name: "qa-mydataset"
+  qa_settings:
+    split:
+      train: 5000
+      test: 1000
+    hf_path: "my-org/my-dataset"
+    extract_final_answer: true
 ```
 
 ## 训练流程

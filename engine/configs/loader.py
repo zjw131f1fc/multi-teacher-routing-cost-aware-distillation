@@ -445,8 +445,8 @@ def set_random_seed(seed: int):
     torch.backends.cudnn.benchmark = False
 
 
-def load_config(override_dict: Optional[Dict[str, Any]] = None, 
-                override_file: Optional[str] = None,
+def load_config(override_file: Optional[str] = None,
+                override_dict: Optional[Dict[str, Any]] = None, 
                 skip_auto_paths: bool = False) -> Dict[str, Any]:
     """加载配置
     

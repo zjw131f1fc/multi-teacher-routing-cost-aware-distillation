@@ -1,0 +1,61 @@
+# QA 数据集（GSM8K）配置示例
+
+global_settings:
+  seed: 42
+  device: "cuda"
+  dtype: "bfloat16"
+  dataset_cache_dir: "/data/users/zjw/dataset_cache"
+  hf_cache_dir: "/data/users/zjw/huggingface_cache"
+  study_name: "qa_gsm8k_example"
+
+config_settings:
+  enable_dict_overrides: true
+  enable_yaml_overrides: true
+  log_config_on_load: true
+
+manager_settings:
+  name: "basic"
+  mode: "direct"
+  num_subtasks: 1
+  available_gpus: [0]
+  gpus_per_subtask: 1
+  poll_interval: 5.0
+
+# QA 数据集配置
+dataset_settings:
+  type: "qa"
+  name: "qa-gsm8k"
+  qa_settings:
+    split:
+      train: 100        # 训练集样本数（测试用，正式使用建议 7000）
+      test: 50          # 测试集样本数（测试用，正式使用建议 1319）
+
+backbone_settings:
+  type: "llm"
+  name: "qwen2.5-0.5b-instruct"
+  llm_settings:
+    device_map: "auto"
+
+trainer_settings:
+  type: "dl"
+  name: "basic-pytorch"
+  dl_settings:
+    batch_size: 8
+    epochs: 3
+    print_loss_every_batches: 50
+    eval_every_batches: 500
+    save_every_batches: 0
+    save_every_epochs: 1
+    eval_max_samples: 500
+    grad_clip_max_norm: 1.0
+    use_warmup: true
+    warmup_ratio: 0.1
+    optimizers:
+      model:
+        type: "adamw"
+        lr: 5.0e-5
+        weight_decay: 0.01
+
+method_settings:
+  study_name: "qa_gsm8k_example"
+  max_seq_length: 2048
