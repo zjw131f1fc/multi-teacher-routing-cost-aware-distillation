@@ -3,8 +3,8 @@
 This environment integrates all components:
 - Policy network (handled by SB3)
 - Teacher pool
-- Gradient computation
-- Reward computation
+- Gradient computation (last N layers only)
+- Reward computation (with log-scaled gradient norm)
 - Student model training
 """
 
@@ -21,7 +21,7 @@ from .reward import compute_reward
 class TeacherSelectionEnv(gym.Env):
     """Gymnasium environment for teacher selection.
 
-    Observation: Current instruction (returned as dict with text)
+    Observation: Current instruction + time step
     Action: Discrete - [0, num_teachers-1] for selecting teachers
     """
 
@@ -45,6 +45,7 @@ class TeacherSelectionEnv(gym.Env):
                 - lambda_cost: Cost weight coefficient (default: 0.05)
                 - student_update_freq: Train student every N steps (default: 100)
                 - student_train_steps: Number of training steps for student (default: 10)
+                - last_n_layers: Number of last layers for gradient computation (default: 3)
         """
         super().__init__()
 
@@ -59,21 +60,23 @@ class TeacherSelectionEnv(gym.Env):
         self.lambda_cost = self.config.get("lambda_cost", 0.05)
         self.student_update_freq = self.config.get("student_update_freq", 100)
         self.student_train_steps = self.config.get("student_train_steps", 10)
+        self.last_n_layers = self.config.get("last_n_layers", 3)
 
         # Action space: [0, num_teachers-1] for selecting teachers
         num_teachers = len(teacher_pool)
         self.action_space = gym.spaces.Discrete(num_teachers)
 
-        # Observation space: instruction text (we'll return as dict)
+        # Observation space: instruction text + time step
         self.observation_space = gym.spaces.Dict({
-            "instruction": gym.spaces.Text(max_length=1000)
+            "instruction": gym.spaces.Text(max_length=1000),
+            "time_step": gym.spaces.Discrete(100000),
         })
 
         # Training state
         self.current_idx = 0
-        self.dataset_D = []  # Accumulated synthetic dataset
+        self.batch_data = []  # Current batch data for student training
         self.g_val = None  # Validation gradient direction
-        self.step_count = 0
+        self.global_step = 0
 
     def reset(
         self, seed: Optional[int] = None, options: Optional[Dict] = None
@@ -87,14 +90,19 @@ class TeacherSelectionEnv(gym.Env):
 
         # Reset to first instruction
         self.current_idx = 0
-        self.step_count = 0
+        self.global_step = 0
+        self.batch_data = []
 
-        # Compute initial validation gradient
+        # Compute initial validation gradient (last N layers only)
         self.g_val = compute_validation_gradient(
-            self.student_model, self.val_dataloader, self.val_samples
+            self.student_model, self.val_dataloader,
+            self.val_samples, self.last_n_layers
         )
 
-        obs = {"instruction": self.instructions[self.current_idx]}
+        obs = {
+            "instruction": self.instructions[self.current_idx],
+            "time_step": self.global_step,
+        }
         info = {}
 
         return obs, info
@@ -113,18 +121,20 @@ class TeacherSelectionEnv(gym.Env):
         # Call teacher to generate data
         (input_ids, labels), cost = self.teacher_pool.generate(action, instruction)
 
-        # Compute gradient for this sample
-        g_sample = compute_gradient(self.student_model, input_ids, labels)
+        # Compute gradient for this sample (last N layers only)
+        g_sample = compute_gradient(
+            self.student_model, input_ids, labels, self.last_n_layers
+        )
 
-        # Compute reward
+        # Compute reward (with log-scaled gradient norm)
         reward = compute_reward(g_sample, self.g_val, cost, self.lambda_cost)
 
-        # Add to dataset D
-        self.dataset_D.append((input_ids, labels))
+        # Add to batch data
+        self.batch_data.append((input_ids, labels))
 
         # Move to next instruction
         self.current_idx += 1
-        self.step_count += 1
+        self.global_step += 1
 
         # Check if episode is done
         terminated = self.current_idx >= len(self.instructions)
@@ -132,52 +142,60 @@ class TeacherSelectionEnv(gym.Env):
 
         # Prepare next observation
         if not terminated:
-            next_obs = {"instruction": self.instructions[self.current_idx]}
+            next_obs = {
+                "instruction": self.instructions[self.current_idx],
+                "time_step": self.global_step,
+            }
         else:
-            next_obs = {"instruction": ""}  # Dummy observation
+            next_obs = {
+                "instruction": "",
+                "time_step": self.global_step,
+            }
 
         # Train student and update g_val periodically
-        if self.step_count % self.student_update_freq == 0:
+        if self.global_step % self.student_update_freq == 0:
             self.train_student(self.student_train_steps)
             self.g_val = compute_validation_gradient(
-                self.student_model, self.val_dataloader, self.val_samples
+                self.student_model, self.val_dataloader,
+                self.val_samples, self.last_n_layers
             )
 
         # Info dict
         info = {
             "cost": cost,
             "action": action,
-            "dataset_size": len(self.dataset_D),
+            "batch_size": len(self.batch_data),
             "instruction_idx": self.current_idx - 1,
+            "global_step": self.global_step,
         }
 
         return next_obs, reward, terminated, truncated, info
 
-    def get_dataset(self) -> List[Tuple[torch.Tensor, torch.Tensor]]:
-        """Get accumulated dataset D.
+    def get_batch_data(self) -> List[Tuple[torch.Tensor, torch.Tensor]]:
+        """Get current batch data.
 
         Returns:
             List of (input_ids, labels) tuples
         """
-        return self.dataset_D
+        return self.batch_data
 
     def train_student(self, num_steps: int = 1):
-        """Train student model on accumulated dataset.
+        """Train student model on batch data.
 
         Args:
             num_steps: Number of training steps
         """
-        if len(self.dataset_D) == 0:
+        if len(self.batch_data) == 0:
             return
 
         # Simple training loop
         optimizer = torch.optim.Adam(self.student_model.parameters(), lr=1e-4)
 
         for _ in range(num_steps):
-            # Sample batch from dataset D
-            batch_size = min(32, len(self.dataset_D))
-            indices = np.random.choice(len(self.dataset_D), batch_size, replace=False)
-            batch = [self.dataset_D[i] for i in indices]
+            # Sample batch from data
+            batch_size = min(32, len(self.batch_data))
+            indices = np.random.choice(len(self.batch_data), batch_size, replace=False)
+            batch = [self.batch_data[i] for i in indices]
 
             # Stack batch
             input_ids = torch.stack([x[0] for x in batch])

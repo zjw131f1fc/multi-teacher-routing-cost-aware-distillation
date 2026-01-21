@@ -13,6 +13,7 @@ from .mock_data import (
 from .gradient import (
     compute_gradient,
     compute_validation_gradient,
+    get_last_n_layers,
 )
 from .reward import compute_reward
 from .teacher_pool import Teacher, TeacherPool
@@ -29,6 +30,7 @@ __all__ = [
     "MockTeacher",
     "compute_gradient",
     "compute_validation_gradient",
+    "get_last_n_layers",
     "compute_reward",
     "Teacher",
     "TeacherPool",

@@ -1,14 +1,14 @@
 """Reward computation for RL teacher selection.
 
 Reward function:
-    R = Cosine(g_sample, g_val) * ||g_sample|| - λ * Cost
+    R = Cosine(g_sample, g_val) * log(1 + ||g_sample||) - λ * Cost
 
 Where:
-    - g_sample: Gradient from synthetic sample
+    - g_sample: Gradient from synthetic sample (last N layers)
     - g_val: Average gradient direction from validation set (unit vector)
     - Cosine(·,·): Gradient alignment ∈ [-1, 1]
-    - ||g_sample||: Gradient magnitude (learning signal strength)
-    - Cost: Teacher invocation cost (0 for reuse)
+    - log(1 + ||g_sample||): Log-scaled gradient magnitude (prevents outliers)
+    - Cost: Teacher invocation cost
     - λ: Cost weight coefficient
 """
 
@@ -27,7 +27,7 @@ def compute_reward(
     Args:
         g_sample: Gradient vector from synthetic sample (1D tensor)
         g_val: Validation gradient direction (1D tensor, unit vector)
-        cost: Cost of the action (0 for reuse, >0 for teacher calls)
+        cost: Cost of the action
         lambda_cost: Cost weight coefficient
 
     Returns:
@@ -36,8 +36,8 @@ def compute_reward(
     # Gradient alignment (cosine similarity)
     cosine_sim = F.cosine_similarity(g_sample, g_val, dim=0)
 
-    # Gradient magnitude (learning signal strength)
-    grad_norm = torch.norm(g_sample)
+    # Gradient magnitude with log scaling (prevents outliers from dominating)
+    grad_norm = torch.log1p(torch.norm(g_sample))
 
     # Quality term - Cost term
     reward = cosine_sim * grad_norm - lambda_cost * cost

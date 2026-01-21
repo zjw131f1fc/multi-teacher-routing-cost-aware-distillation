@@ -1,13 +1,15 @@
 """Policy Network for Teacher Selection
 
 Architecture:
-    Input (instruction text)
+    Input (instruction text + time_step)
         ↓
     [Frozen DeBERTa Encoder]
         ↓
+    [Concat with Time Step Embedding]
+        ↓
     [Trainable MLP Head]
         ↓
-    Output: [P(T₁), P(T₂), ..., P(Tₙ), P(Reuse)]
+    Output: [P(T₁), P(T₂), ..., P(Tₙ)]
 """
 
 import torch
@@ -17,14 +19,16 @@ from transformers import AutoModel, AutoTokenizer
 
 
 class PolicyNetwork(nn.Module):
-    """Policy network for selecting teachers or reusing data.
+    """Policy network for selecting teachers.
 
     Args:
         encoder: Pretrained encoder model (e.g., DeBERTa)
         tokenizer: Tokenizer for the encoder
-        num_actions: Number of actions (num_teachers + 1 for Reuse)
+        num_actions: Number of actions (num_teachers)
         hidden_dims: List of hidden dimensions for MLP head
         freeze_encoder: Whether to freeze encoder parameters
+        max_time_steps: Maximum number of time steps
+        time_embedding_dim: Dimension of time step embedding
     """
 
     def __init__(
@@ -34,6 +38,8 @@ class PolicyNetwork(nn.Module):
         num_actions: int,
         hidden_dims: list[int] = [512, 256],
         freeze_encoder: bool = True,
+        max_time_steps: int = 100000,
+        time_embedding_dim: int = 64,
     ):
         super().__init__()
 
@@ -48,9 +54,13 @@ class PolicyNetwork(nn.Module):
                 param.requires_grad = False
             self.encoder.eval()
 
-        # Build MLP head
+        # Time step embedding
+        self.time_embedding = nn.Embedding(max_time_steps, time_embedding_dim)
+
+        # Build MLP head (encoder output + time embedding)
         encoder_hidden_size = self.encoder.config.hidden_size
-        self.mlp_head = self._build_mlp(encoder_hidden_size, hidden_dims, num_actions)
+        input_dim = encoder_hidden_size + time_embedding_dim
+        self.mlp_head = self._build_mlp(input_dim, hidden_dims, num_actions)
 
     def _build_mlp(self, input_dim: int, hidden_dims: list[int], output_dim: int) -> nn.Module:
         """Build MLP head with specified architecture."""
@@ -107,37 +117,53 @@ class PolicyNetwork(nn.Module):
 
         return encoded
 
-    def forward(self, instruction_text: str | list[str]) -> torch.Tensor:
-        """Forward pass: instruction -> action probabilities.
+    def forward(self, instruction_text: str | list[str], time_step: int | torch.Tensor) -> torch.Tensor:
+        """Forward pass: instruction + time_step -> action probabilities.
 
         Args:
             instruction_text: Single instruction or batch of instructions
+            time_step: Current time step (int or tensor)
 
         Returns:
             Action probabilities (batch_size, num_actions)
         """
         # Encode instruction
         encoded = self.encode(instruction_text)
+        batch_size = encoded.size(0)
+
+        # Get time embedding
+        if isinstance(time_step, int):
+            time_step = torch.tensor([time_step], device=encoded.device)
+        if time_step.dim() == 0:
+            time_step = time_step.unsqueeze(0)
+        if time_step.size(0) == 1 and batch_size > 1:
+            time_step = time_step.expand(batch_size)
+
+        time_emb = self.time_embedding(time_step)  # (batch_size, time_embedding_dim)
+
+        # Concat instruction encoding and time embedding
+        combined = torch.cat([encoded, time_emb], dim=-1)
 
         # MLP head
-        logits = self.mlp_head(encoded)
+        logits = self.mlp_head(combined)
 
         # Softmax to get probabilities
         probs = F.softmax(logits, dim=-1)
 
         return probs
 
-    def sample_action(self, instruction_text: str | list[str]) -> tuple[torch.Tensor, torch.Tensor]:
+    def sample_action(self, instruction_text: str | list[str], time_step: int | torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Sample action from policy distribution.
 
         Args:
             instruction_text: Single instruction or batch of instructions
+            time_step: Current time step
 
         Returns:
             actions: Sampled action indices (batch_size,)
             log_probs: Log probabilities of sampled actions (batch_size,)
         """
-        probs = self.forward(instruction_text)
+        probs = self.forward(instruction_text, time_step)
 
         # Sample from categorical distribution
         dist = torch.distributions.Categorical(probs)
@@ -146,16 +172,17 @@ class PolicyNetwork(nn.Module):
 
         return actions, log_probs
 
-    def get_action_probs(self, instruction_text: str | list[str], actions: torch.Tensor) -> torch.Tensor:
+    def get_action_probs(self, instruction_text: str | list[str], time_step: int | torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
         """Get probabilities of specific actions.
 
         Args:
             instruction_text: Single instruction or batch of instructions
+            time_step: Current time step
             actions: Action indices (batch_size,)
 
         Returns:
             Action probabilities (batch_size,)
         """
-        probs = self.forward(instruction_text)
+        probs = self.forward(instruction_text, time_step)
         action_probs = probs.gather(1, actions.unsqueeze(-1)).squeeze(-1)
         return action_probs
