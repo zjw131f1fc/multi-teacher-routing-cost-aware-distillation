@@ -2,7 +2,7 @@
 
 This environment integrates all components:
 - Policy network (handled by SB3)
-- Teacher pool
+- Teacher pool (string-based interface)
 - Gradient computation (last N layers only)
 - Reward computation (with log-scaled gradient norm)
 - Student model training
@@ -13,7 +13,7 @@ import numpy as np
 import torch
 from typing import List, Optional, Dict, Any, Tuple
 
-from .teacher_pool import TeacherPool
+from ..teachers import TeacherPool
 from .gradient import compute_gradient, compute_validation_gradient
 from .reward import compute_reward
 
@@ -31,6 +31,7 @@ class TeacherSelectionEnv(gym.Env):
         student_model: torch.nn.Module,
         teacher_pool: TeacherPool,
         val_dataloader,
+        tokenizer,
         config: Optional[Dict[str, Any]] = None,
     ):
         """Initialize environment.
@@ -38,9 +39,12 @@ class TeacherSelectionEnv(gym.Env):
         Args:
             instructions: List of training instructions
             student_model: Student model to train
-            teacher_pool: Pool of teacher models
+            teacher_pool: TeacherPool instance
             val_dataloader: Validation dataloader
+            tokenizer: Tokenizer for converting text to tensors
             config: Configuration dict with:
+                - teacher_names: List of teacher names
+                - teacher_costs: Dict of teacher_name -> cost
                 - val_samples: Number of validation samples for gradient (default: 200)
                 - lambda_cost: Cost weight coefficient (default: 0.05)
                 - student_update_freq: Train student every N steps (default: 100)
@@ -53,9 +57,12 @@ class TeacherSelectionEnv(gym.Env):
         self.student_model = student_model
         self.teacher_pool = teacher_pool
         self.val_dataloader = val_dataloader
+        self.tokenizer = tokenizer
 
         # Configuration
         self.config = config or {}
+        self.teacher_names = self.config.get("teacher_names", [])
+        self.teacher_costs = self.config.get("teacher_costs", {})
         self.val_samples = self.config.get("val_samples", 200)
         self.lambda_cost = self.config.get("lambda_cost", 0.05)
         self.student_update_freq = self.config.get("student_update_freq", 100)
@@ -63,7 +70,7 @@ class TeacherSelectionEnv(gym.Env):
         self.last_n_layers = self.config.get("last_n_layers", 3)
 
         # Action space: [0, num_teachers-1] for selecting teachers
-        num_teachers = len(teacher_pool)
+        num_teachers = len(self.teacher_names)
         self.action_space = gym.spaces.Discrete(num_teachers)
 
         # Observation space: instruction text + time step
@@ -77,6 +84,32 @@ class TeacherSelectionEnv(gym.Env):
         self.batch_data = []  # Current batch data for student training
         self.g_val = None  # Validation gradient direction
         self.global_step = 0
+
+    def _get_teacher_name(self, action: int) -> str:
+        """Convert action index to teacher name."""
+        return self.teacher_names[action]
+
+    def _get_teacher_cost(self, teacher_name: str) -> float:
+        """Get cost for a teacher."""
+        return self.teacher_costs.get(teacher_name, 0.0)
+
+    def _tokenize(self, instruction: str, response: str) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Tokenize instruction and response into input_ids and labels."""
+        # Combine instruction and response
+        text = f"{instruction}\n{response}"
+
+        encoded = self.tokenizer(
+            text,
+            padding="max_length",
+            truncation=True,
+            max_length=512,
+            return_tensors="pt",
+        )
+
+        input_ids = encoded["input_ids"].squeeze(0)
+        labels = input_ids.clone()
+
+        return input_ids, labels
 
     def reset(
         self, seed: Optional[int] = None, options: Optional[Dict] = None
@@ -118,8 +151,15 @@ class TeacherSelectionEnv(gym.Env):
         """
         instruction = self.instructions[self.current_idx]
 
-        # Call teacher to generate data
-        (input_ids, labels), cost = self.teacher_pool.generate(action, instruction)
+        # Convert action to teacher name
+        teacher_name = self._get_teacher_name(action)
+        cost = self._get_teacher_cost(teacher_name)
+
+        # Get teacher output (string)
+        response = self.teacher_pool.get_output(instruction, teacher_name)
+
+        # Tokenize to get input_ids and labels
+        input_ids, labels = self._tokenize(instruction, response)
 
         # Compute gradient for this sample (last N layers only)
         g_sample = compute_gradient(
@@ -164,6 +204,7 @@ class TeacherSelectionEnv(gym.Env):
         info = {
             "cost": cost,
             "action": action,
+            "teacher_name": teacher_name,
             "batch_size": len(self.batch_data),
             "instruction_idx": self.current_idx - 1,
             "global_step": self.global_step,

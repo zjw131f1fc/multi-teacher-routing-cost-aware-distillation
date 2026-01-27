@@ -1,224 +1,112 @@
-"""Main entry point for RL-based teacher selection training.
+"""Main entry point for RL-based teacher selection training."""
 
-Usage:
-    python main.py [--config CONFIG_PATH]
-
-Example:
-    python main.py --config configs/rl_teacher_selection.yaml
-"""
-
-import argparse
-import yaml
-import torch
 from pathlib import Path
-from typing import Dict, Any
+
+from configs import load_config
+from datas import load_dataset
+from models import load_student, load_student_tokenizer, load_teachers
+from teachers import TeacherPool
+from rl import TeacherSelectionEnv, PolicyNetwork
 
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback
-
-from methods.rl_teacher_selection.sb3_env import TeacherSelectionEnv
-from methods.rl_teacher_selection.teacher_pool import Teacher, TeacherPool
-from methods.rl_teacher_selection.mock_data import (
-    get_mock_instructions,
-    get_mock_student_model,
-    get_mock_teachers,
-    get_mock_val_loader,
-)
+from transformers import AutoModel, AutoTokenizer
 
 
 class TrainingCallback(BaseCallback):
     """Callback for logging training progress."""
 
-    def __init__(self, eval_freq: int = 1000, verbose: int = 1):
+    def __init__(self, verbose=0):
         super().__init__(verbose)
-        self.eval_freq = eval_freq
-        self.total_cost = 0.0
-        self.teacher_counts = {}
 
     def _on_step(self) -> bool:
-        # Track costs and teacher selections
-        if "cost" in self.locals.get("infos", [{}])[0]:
-            info = self.locals["infos"][0]
-            self.total_cost += info.get("cost", 0)
-            action = info.get("action", -1)
-            self.teacher_counts[action] = self.teacher_counts.get(action, 0) + 1
-
-        # Log periodically
-        if self.n_calls % self.eval_freq == 0:
-            print(f"\n[Step {self.n_calls}]")
-            print(f"  Total cost: {self.total_cost:.2f}")
-            print(f"  Teacher selections: {self.teacher_counts}")
-
+        if self.n_calls % 100 == 0:
+            print(f"Step {self.n_calls}")
         return True
 
 
-def load_config(config_path: str) -> Dict[str, Any]:
-    """Load configuration from YAML file."""
-    with open(config_path, "r") as f:
-        return yaml.safe_load(f)
+def main(config_path: str):
+    # 1. 加载配置
+    config = load_config(config_path)
+    print(f"Loaded config from {config_path}")
 
+    # 2. 加载数据集
+    dataset = load_dataset(config)
+    print(f"Loaded dataset with {len(dataset)} samples")
 
-def get_default_config() -> Dict[str, Any]:
-    """Get default configuration."""
-    return {
-        "policy_settings": {
-            "bert_model": "bert-base-uncased",
-            "mlp_hidden_dims": [512, 256],
-            "freeze_bert": True,
-            "max_time_steps": 100000,
-            "time_embedding_dim": 64,
-        },
-        "teacher_pool": [
-            {"name": "gpt-4", "cost": 1.0},
-            {"name": "gpt-3.5", "cost": 0.1},
-            {"name": "llama-70b", "cost": 0.5},
-        ],
-        "training_settings": {
-            "batch_size": 1000,
-            "policy_update_freq": 200,
-            "eval_freq": 5,
-            "total_timesteps": 10000,
-        },
-        "gradient_settings": {
-            "last_n_layers": 3,
-        },
-        "reward_settings": {
-            "lambda_cost": 0.05,
-            "val_samples": 200,
-        },
-        "ppo_settings": {
-            "learning_rate": 1e-4,
-            "clip_range": 0.2,
-            "vf_coef": 0.5,
-            "ent_coef": 0.01,
-            "n_steps": 128,
-            "batch_size": 64,
-        },
-    }
+    # 3. 加载 student 模型和 tokenizer
+    student = load_student(config)
+    tokenizer = load_student_tokenizer(config)
+    print(f"Loaded student model")
 
+    # 4. 加载 teacher 模型
+    teachers = load_teachers(config)
+    print(f"Loaded {len(teachers)} teachers: {list(teachers.keys())}")
 
-def setup_environment(config: Dict[str, Any], device: str = "cpu"):
-    """Setup training environment with mock data.
+    # 5. 创建 TeacherPool
+    teacher_pool = TeacherPool(config, dataset, teachers)
+    print("Created TeacherPool")
 
-    Args:
-        config: Configuration dictionary
-        device: Device to use
+    # 6. 准备 instructions 和 val_dataloader
+    instructions = [sample["instruction"] for sample in dataset.samples]
+    val_dataloader = None  # TODO: 从 config 加载验证集
 
-    Returns:
-        TeacherSelectionEnv instance
-    """
-    # Get mock data
-    instructions = get_mock_instructions(config["training_settings"]["batch_size"])
-    student_model = get_mock_student_model(device)
-    mock_teachers = get_mock_teachers()
-    val_loader = get_mock_val_loader()
-
-    # Create teacher pool
-    teachers = [
-        Teacher(
-            name=t.name,
-            model=t,
-            cost=t.cost,
-            generate_fn=lambda model, instr: model.generate(instr),
-        )
-        for t in mock_teachers
-    ]
-    teacher_pool = TeacherPool(teachers)
-
-    # Environment config
+    # 7. 创建环境
     env_config = {
-        "val_samples": config["reward_settings"]["val_samples"],
-        "lambda_cost": config["reward_settings"]["lambda_cost"],
-        "student_update_freq": config["training_settings"]["policy_update_freq"],
-        "student_train_steps": 10,
-        "last_n_layers": config["gradient_settings"]["last_n_layers"],
+        "teacher_names": list(teachers.keys()),
+        "teacher_costs": config.get("teacher_costs", {}),
+        "val_samples": config.get("rl", {}).get("val_samples", 200),
+        "lambda_cost": config.get("rl", {}).get("lambda_cost", 0.05),
+        "student_update_freq": config.get("rl", {}).get("student_update_freq", 100),
+        "student_train_steps": config.get("rl", {}).get("student_train_steps", 10),
+        "last_n_layers": config.get("rl", {}).get("last_n_layers", 3),
     }
-
-    # Create environment
     env = TeacherSelectionEnv(
         instructions=instructions,
-        student_model=student_model,
+        student_model=student,
         teacher_pool=teacher_pool,
-        val_dataloader=val_loader,
+        val_dataloader=val_dataloader,
+        tokenizer=tokenizer,
         config=env_config,
     )
+    print("Created TeacherSelectionEnv")
 
-    return env
+    # 8. 创建 Policy Network (用于 PPO 的 feature extractor)
+    policy_config = config.get("policy", {})
+    encoder_name = policy_config.get("encoder_name", "bert-base-uncased")
+    encoder = AutoModel.from_pretrained(encoder_name)
+    policy_tokenizer = AutoTokenizer.from_pretrained(encoder_name)
 
-
-def train(config: Dict[str, Any], device: str = "cpu"):
-    """Run training.
-
-    Args:
-        config: Configuration dictionary
-        device: Device to use
-    """
-    print("Setting up environment...")
-    env = setup_environment(config, device)
-
-    print("Creating PPO model...")
-    ppo_config = config["ppo_settings"]
+    # 9. 训练 PPO
+    ppo_config = config.get("ppo", {})
     model = PPO(
         "MultiInputPolicy",
         env,
-        learning_rate=ppo_config["learning_rate"],
-        clip_range=ppo_config["clip_range"],
-        vf_coef=ppo_config["vf_coef"],
-        ent_coef=ppo_config["ent_coef"],
-        n_steps=ppo_config["n_steps"],
-        batch_size=ppo_config["batch_size"],
+        learning_rate=ppo_config.get("learning_rate", 3e-4),
+        n_steps=ppo_config.get("n_steps", 128),
+        batch_size=ppo_config.get("batch_size", 64),
         verbose=1,
     )
+    print("Created PPO model")
 
-    print("Starting training...")
-    callback = TrainingCallback(eval_freq=100)
+    total_timesteps = config.get("training", {}).get("total_timesteps", 10000)
+    print(f"Starting training for {total_timesteps} timesteps...")
     model.learn(
-        total_timesteps=config["training_settings"]["total_timesteps"],
-        callback=callback,
+        total_timesteps=total_timesteps,
+        callback=TrainingCallback(),
     )
 
-    print("\nTraining complete!")
-    print(f"Total cost: {callback.total_cost:.2f}")
-    print(f"Teacher selections: {callback.teacher_counts}")
-
-    return model
-
-
-def main():
-    parser = argparse.ArgumentParser(description="RL-based Teacher Selection Training")
-    parser.add_argument(
-        "--config",
-        type=str,
-        default=None,
-        help="Path to configuration YAML file",
-    )
-    parser.add_argument(
-        "--device",
-        type=str,
-        default="cuda" if torch.cuda.is_available() else "cpu",
-        help="Device to use (cuda/cpu)",
-    )
-    args = parser.parse_args()
-
-    # Load config
-    if args.config and Path(args.config).exists():
-        print(f"Loading config from {args.config}")
-        config = load_config(args.config)
-    else:
-        print("Using default config")
-        config = get_default_config()
-
-    print(f"Using device: {args.device}")
-    print(f"Config: {config}")
-
-    # Train
-    model = train(config, args.device)
-
-    # Save model
-    save_path = "rl_teacher_selection_model.zip"
+    # 10. 保存模型
+    save_path = config.get("training", {}).get("save_path", "./output/model")
     model.save(save_path)
     print(f"Model saved to {save_path}")
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", type=str, default="config.yaml")
+    args = parser.parse_args()
+
+    main(args.config)

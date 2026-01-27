@@ -7,7 +7,7 @@ This module provides functions to compute gradients for reward calculation:
 
 import torch
 import torch.nn as nn
-from typing import Optional, List
+from typing import List
 
 
 def get_last_n_layers(model: nn.Module, n: int = 3) -> List[nn.Module]:
